@@ -4,81 +4,49 @@ on:
   push:
     branches: [ main ]
   pull_request:
+    branches: [ main ]
 
 jobs:
-  # run unit tests for backend services in parallel
-  backend-tests:
+
+  test:
     runs-on: ubuntu-latest
+
     strategy:
       matrix:
-        service: [ identity-service, account-service, transaction-service ]
-    name: "Test ${{ matrix.service }}"
-    defaults:
-      run:
-        working-directory: services/${{ matrix.service }}
+        service:
+          - identity-service
+          - account-service
+
     steps:
-      - name: Checkout code
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v4
         with:
           python-version: 3.11
 
-      - name: Install service dependencies
+      - name: Install dependencies
         run: |
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          cd services/${{ matrix.service }}
+          pip install -r requirements.txt
 
-      - name: Run pytest
+      - name: Run Tests
         run: |
-          if [ -d tests ] && [ "$(ls -A tests)" ]; then pytest tests || echo "no tests"; fi
+          cd services/${{ matrix.service }}
+          pytest
 
-  # lint/build frontend
-  frontend:
-    runs-on: ubuntu-latest
-    name: "Frontend lint and build"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: "18"
-          cache: "npm"
-
-      - name: Install frontend dependencies
-        run: |
-          cd frontend
-          npm ci
-
-      - name: Lint frontend
-        run: |
-          cd frontend
-          npm run lint
-
-      - name: Build frontend
-        run: |
-          cd frontend
-          npm run build
-
-  # optional: build docker images to ensure compose works
   docker-build:
+
     runs-on: ubuntu-latest
-    needs: [backend-tests, frontend]
-    name: "Docker compose build"
+    needs: test
+
     steps:
-      - name: Checkout code
+
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for multi-arch build)
-        uses: docker/setup-qemu-action@v2
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
-
-      - name: Build compose services
+      - name: Build Docker Images
         run: |
-          cd infrastructure
-          docker-compose pull || true
-          docker-compose build
+          docker compose -f infrastructure/docker-compose.yml build

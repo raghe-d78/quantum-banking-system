@@ -3,16 +3,15 @@ from app.main import app
 
 client = TestClient(app)
 
-
 def test_user_registration():
 
     response = client.post(
         "/register",
         json={
-            "email": "user@test.com",
-            "password": "securepassword"
+            "email": "test@test.com",
+            "password": "123456"
         }
     )
 
     assert response.status_code == 200
-    assert response.json()["email"] == "user@test.com"
+    assert response.json()["email"] == "test@test.com"

@@ -1,16 +1,15 @@
 from fastapi import APIRouter
-from .models import Account
+from pydantic import BaseModel
 
 router = APIRouter()
 
-accounts = []
+class Account(BaseModel):
+    user_id: str
+    balance: float
 
 @router.post("/accounts")
 def create_account(account: Account):
-
-    accounts.append(account)
-
     return {
         "message": "Account created",
-        "owner": account.owner
+        "user_id": account.user_id
     }

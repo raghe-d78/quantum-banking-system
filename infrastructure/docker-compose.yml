@@ -1,5 +1,12 @@
 services:
 
+  cockroachdb:
+    image: cockroachdb/cockroach:v23.2
+    command: start-single-node --insecure
+    ports:
+      - "26257:26257"
+      - "8080:8080"
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     environment:
@@ -16,24 +23,12 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
 
-  cockroachdb:
-    image: cockroachdb/cockroach
-    command: start-single-node --insecure
-    ports:
-      - "26257:26257"
-
   identity-service:
     build: ../services/identity-service
     ports:
       - "8001:8000"
-    depends_on:
-      - cockroachdb
-      - kafka
 
   account-service:
     build: ../services/account-service
     ports:
       - "8002:8000"
-    depends_on:
-      - cockroachdb
-      - kafka

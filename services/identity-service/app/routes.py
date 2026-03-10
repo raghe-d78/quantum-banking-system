@@ -1,15 +1,14 @@
 from fastapi import APIRouter
-from .models import User
+from pydantic import BaseModel
 
 router = APIRouter()
 
-users = []
+class UserRegistration(BaseModel):
+    email: str
+    password: str
 
 @router.post("/register")
-def register(user: User):
-
-    users.append(user)
-
+def register(user: UserRegistration):
     return {
         "message": "User registered",
         "email": user.email
