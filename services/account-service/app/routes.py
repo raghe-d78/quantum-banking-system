@@ -1,3 +1,4 @@
+
 from fastapi import HTTPException
 from fastapi import APIRouter, status
 from .models import Account
@@ -15,4 +16,4 @@ def create_account(account: Account):
         "user_id": account.user_id,
         "account_type": account.account_type,
         "balance": account.balance
-    }
+
