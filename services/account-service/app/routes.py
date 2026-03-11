@@ -17,3 +17,4 @@ def create_account(account: Account):
         "account_type": account.account_type,
         "balance": account.balance
 
+    }
