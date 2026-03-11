@@ -3,3 +3,4 @@ uvicorn
 pytest
 pydantic
 email-validator
+httpx

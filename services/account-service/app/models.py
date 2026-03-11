@@ -1,7 +1,6 @@
 from pydantic import BaseModel
 
-
 class Account(BaseModel):
-
-    owner: str
-    currency: str
+    user_id: int
+    account_type: str
+    balance: float
