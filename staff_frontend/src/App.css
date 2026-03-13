@@ -1,0 +1,19 @@
+.blur-gradient {
+  position: fixed;
+  inset: 0;
+  z-index: 1;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+
+  /* Gradient mask: transparent at top → opaque at bottom */
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    black 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0%,
+    black 100%
+  );
+}
