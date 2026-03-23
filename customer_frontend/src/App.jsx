@@ -4,6 +4,7 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-d
 import LoginPage    from "./pages/LoginPage";
 import Dashboard    from "./pages/dashboard";
 import ProtectedRoute from "./components/ProectedRoute";
+import TransactionDetail from "./pages/TransactionDetail";
 
 export default function App() {
   return (
@@ -12,6 +13,7 @@ export default function App() {
         <Routes>
           {/* Public */}
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/transaction/:id" element={<TransactionDetail />} />
 
           {/* Protected */}
           <Route

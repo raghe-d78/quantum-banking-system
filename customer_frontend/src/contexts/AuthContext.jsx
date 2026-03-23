@@ -1,12 +1,11 @@
-// src/contexts/AuthContext.jsx
+// customer_frontend/src/contexts/AuthContext.jsx
 import { createContext, useContext, useState } from "react";
 import api from "../lib/api";
 
 const AuthContext = createContext();
 
 export function AuthProvider({ children }) {
-  const [user, setUser]   = useState(() => {
-    // Persist session across page refresh
+  const [user, setUser] = useState(() => {
     const stored = localStorage.getItem("user");
     return stored ? JSON.parse(stored) : null;
   });
@@ -16,15 +15,12 @@ export function AuthProvider({ children }) {
     setError(null);
     try {
       const { data } = await api.post("/auth/login", { username, password });
-      // Expected response: { token: "...", user: { id, username, name, ... } }
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
       setUser(data.user);
       return true;
     } catch (err) {
-      const message =
-        err.response?.data?.message ?? "Invalid credentials. Please try again.";
-      setError(message);
+      setError(err.response?.data?.message ?? "Invalid credentials. Please try again.");
       return false;
     }
   };
