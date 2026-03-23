@@ -1,11 +1,13 @@
-FROM python:3.11
+FROM node:20
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY services/identity-service/package*.json ./
+RUN npm install
 
-RUN pip install -r requirements.txt
+COPY services/identity-service ./services/identity-service
+COPY shared ./shared
 
-COPY . .
+WORKDIR /app/services/identity-service
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["node","src/server.js"]
