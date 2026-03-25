@@ -86,38 +86,8 @@ const BalancePage = () => {
         </div>
       </div>
 
-      {/* Transactions */}
-      <div style={{ background: "#fff", borderRadius: 16, padding: "24px 28px", boxShadow: "0 2px 12px rgba(0,0,0,0.06)", border: "1px solid var(--color-cream-border)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-          <div style={{ fontSize: 11, letterSpacing: 2, textTransform: "uppercase", color: "var(--color-muted)", fontWeight: 600 }}>Recent Transactions</div>
-          <button style={{ fontSize: 11, color: "var(--color-gold)", background: "none", border: "none", cursor: "pointer", letterSpacing: 0.5 }}>View All →</button>
-        </div>
-        {accountData.transactions.map((tx, i) => (
-          <div key={tx.id} style={{
-            display: "flex", alignItems: "center", justifyContent: "space-between",
-            padding: "14px 0",
-            borderBottom: i < accountData.transactions.length - 1 ? "1px solid #f0ebe2" : "none",
-          }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-              <div style={{
-                width: 38, height: 38, borderRadius: "50%",
-                background: tx.type === "credit" ? "var(--color-green-bg)" : "var(--color-red-bg)",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                fontSize: 14, color: tx.type === "credit" ? "var(--color-green)" : "var(--color-red)",
-              }}>
-                {tx.type === "credit" ? "↓" : "↑"}
-              </div>
-              <div>
-                <div style={{ fontSize: 13, color: "var(--color-navy)", fontWeight: 500 }}>{tx.label}</div>
-                <div style={{ fontSize: 11, color: "#bbb", marginTop: 2 }}>{tx.date}</div>
-              </div>
-            </div>
-            <div style={{ fontSize: 14, fontWeight: 600, color: tx.type === "credit" ? "var(--color-green)" : "var(--color-red)" }}>
-              {tx.type === "credit" ? "+" : "−"}{fmt(tx.amount)} {accountData.currency}
-            </div>
-          </div>
-        ))}
-      </div>
+      
+      
     </div>
   );
 };
