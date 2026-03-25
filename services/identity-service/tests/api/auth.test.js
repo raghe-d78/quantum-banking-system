@@ -9,7 +9,9 @@ jest.mock("../../src/user.repository", () => ({
   create:         jest.fn(),
   findById:       jest.fn(),
 }))
-
+jest.mock("axios", () => ({
+  post: jest.fn().mockResolvedValue({ data: { account: {} } }),
+}))
 const userRepo = require("../../src/user.repository")
 const bcrypt   = require("bcrypt")
 
