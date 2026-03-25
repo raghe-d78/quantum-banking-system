@@ -5,6 +5,10 @@ jest.mock("../../src/user.repository", () => ({
   create:         jest.fn(),
   findById:       jest.fn(),
 }))
+// tests/unit/auth.service.test.js
+jest.mock("axios", () => ({
+  post: jest.fn(() => Promise.resolve({ data: { accountId: 123 } }))
+}));
 
 const authService = require("../../src/auth.service")
 const userRepo    = require("../../src/user.repository")
