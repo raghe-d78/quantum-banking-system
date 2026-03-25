@@ -11,7 +11,7 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "jest"
+    "test": "jest tests/unit"
   },
   "dependencies": {
     "axios": "^1.13.6",
