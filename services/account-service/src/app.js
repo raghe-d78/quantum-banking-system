@@ -1,4 +1,4 @@
-// identity-service/src/app.js
+// services/account-service/src/app.js
 const express = require("express")
 const cors    = require("cors")
 const routes  = require("./routes")
@@ -9,7 +9,6 @@ app.use(cors())
 app.use(express.json())
 app.use(routes)
 
-// Global error handler
 app.use((err, req, res, next) => {
   console.error(err)
   res.status(500).json({ message: "Internal server error" })

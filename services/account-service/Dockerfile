@@ -2,12 +2,12 @@ FROM node:20
 
 WORKDIR /app
 
-COPY services/identity-service/package*.json ./
+COPY services/account-service/package*.json ./
 RUN npm install
 
-COPY services/identity-service ./services/identity-service
+COPY services/account-service ./services/account-service
 COPY shared ./shared
 
-WORKDIR /app/services/identity-service
+WORKDIR /app/services/account-service
 
-CMD ["node","src/server.js"]
+CMD ["node", "src/server.js"]

@@ -7,18 +7,57 @@ services:
     ports:
       - "26257:26257"
       - "8080:8080"
+    volumes:
+      - ../scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    healthcheck:
+      test: ["CMD", "cockroach", "sql", "--insecure", "--execute=SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   identity-service:
     build:
       context: ..
       dockerfile: services/identity-service/Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
+      - JWT_EXPIRES=24h
+      - DB_HOST=cockroachdb
+      - DB_PORT=26257
+      - DB_NAME=identity_db
+      - ACCOUNT_SERVICE_URL=http://account-service:3002
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
 
   account-service:
     build:
       context: ..
       dockerfile: services/account-service/Dockerfile
+    ports:
+      - "3002:3002"
+    environment:
+      - PORT=3002
+      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
+      - DB_HOST=cockroachdb
+      - DB_PORT=26257
+      - DB_NAME=account_db
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
 
   api-gateway:
     build: ../services/api-gateway
     ports:
       - "3000:3000"
+    environment:
+      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
+      - CORS_ORIGIN=http://localhost:5173,http://localhost:5174
+      - IDENTITY_SERVICE_URL=http://identity-service:3001
+      - ACCOUNT_SERVICE_URL=http://account-service:3002
+    depends_on:
+      - identity-service
+      - account-service

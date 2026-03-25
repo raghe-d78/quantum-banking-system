@@ -1,4 +1,4 @@
-// src/contexts/AuthContext.jsx
+
 import { createContext, useContext, useState } from "react";
 import api from "../lib/api";
 
@@ -15,11 +15,11 @@ export function AuthProvider({ children }) {
     setError(null);
     try {
       const { data } = await api.post("/auth/login", { username, password });
-      // Expected response: { token: "...", user: { id, username, name, role: "admin" | "staff" } }
+      
       localStorage.setItem("token", data.token);
       localStorage.setItem("user", JSON.stringify(data.user));
       setUser(data.user);
-      return data.user; // return full user so caller can read the role
+      return data.user;
     } catch (err) {
       const message =
         err.response?.data?.message ?? "Invalid credentials. Please try again.";

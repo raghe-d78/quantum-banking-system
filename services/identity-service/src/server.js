@@ -1,5 +1,9 @@
+// identity-service/src/server.js
+require("dotenv").config()
 const app = require("./app")
 
-app.listen(3001, () => {
-  console.log("Identity service running")
+const PORT = process.env.PORT || 3001
+
+app.listen(PORT, () => {
+  console.log(`Identity service running on port ${PORT}`)
 })

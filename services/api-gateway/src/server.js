@@ -1,51 +1,91 @@
-// const express = require("express");
-// const cors = require("cors");
+// services/api-gateway/src/server.js
+const express = require("express");
+const cors    = require("cors");
+const axios   = require("axios");
 
-// const authRoutes = require("./routes/auth.routes");
-// const accountRoutes = require("./routes/account.routes");
+const app = express();
 
-// const app = express();
+// ── CORS ──────────────────────────────────────────────────────────
+const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173,http://localhost:5174")
+  .split(",");
 
-// app.use(cors());
-// app.use(express.json());
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
+  allowedHeaders: "Origin,X-Requested-With,Content-Type,Accept,Authorization",
+}));
+app.options("*", cors({ origin: allowedOrigins }));
+app.use(express.json());
 
-// app.use("/auth", authRoutes);
-// app.use("/accounts", accountRoutes);
+// ── Service URLs ──────────────────────────────────────────────────
+const IDENTITY = process.env.IDENTITY_SERVICE_URL || "http://identity-service:3001";
+const ACCOUNT  = process.env.ACCOUNT_SERVICE_URL  || "http://account-service:3002";
 
-// app.get("/health", (req, res) => {
-//   res.json({ status: "gateway running" });
-// });
+// ── Proxy helper ──────────────────────────────────────────────────
+const proxy = async (res, fn) => {
+  try {
+    const result = await fn();
+    res.status(result.status).json(result.data);
+  } catch (err) {
+    const status = err.response?.status || 500;
+    const data   = err.response?.data   || { message: err.message };
+    res.status(status).json(data);
+  }
+};
 
-// const PORT = process.env.PORT || 8000;
+const authHeader = (req) => ({
+  Authorization: req.headers.authorization || "",
+});
 
-// app.listen(PORT, () => {
-//   console.log(`API Gateway running on port ${PORT}`);
-// });
+// ── AUTH → identity-service ───────────────────────────────────────
+app.post("/auth/login", (req, res) =>
+  proxy(res, () => axios.post(`${IDENTITY}/auth/login`, req.body))
+);
 
-const express = require("express")
-const axios = require("axios")
+app.get("/auth/me", (req, res) =>
+  proxy(res, () =>
+    axios.get(`${IDENTITY}/auth/me`, { headers: authHeader(req) })
+  )
+);
 
-const app = express()
-app.use(express.json())
+// ── ADMIN → identity-service ──────────────────────────────────────
+app.post("/admin/users", (req, res) =>
+  proxy(res, () =>
+    axios.post(`${IDENTITY}/admin/users`, req.body, { headers: authHeader(req) })
+  )
+);
 
-app.post("/auth/register", async (req,res)=>{
-  const r = await axios.post("http://identity-service:3001/register", req.body)
-  res.json(r.data)
-})
+// ── ACCOUNT → account-service ─────────────────────────────────────
+app.get("/balance", (req, res) =>
+  proxy(res, () =>
+    axios.get(`${ACCOUNT}/balance`, { headers: authHeader(req) })
+  )
+);
 
-app.post("/auth/login", async (req,res)=>{
-  const r = await axios.post("http://identity-service:3001/login", req.body)
-  res.json(r.data)
-})
+app.get("/transactions", (req, res) =>
+  proxy(res, () =>
+    axios.get(`${ACCOUNT}/transactions`, { headers: authHeader(req) })
+  )
+);
 
-app.post("/account", async (req,res)=>{
-  const r = await axios.post("http://account-service:3002/account", req.body)
-  res.json(r.data)
-})
+app.get("/transactions/:id", (req, res) =>
+  proxy(res, () =>
+    axios.get(`${ACCOUNT}/transactions/${req.params.id}`, { headers: authHeader(req) })
+  )
+);
 
-app.get("/account/:id", async (req,res)=>{
-  const r = await axios.get(`http://account-service:3002/account/${req.params.id}`)
-  res.json(r.data)
-})
+app.post("/transactions", (req, res) =>
+  proxy(res, () =>
+    axios.post(`${ACCOUNT}/transactions`, req.body, { headers: authHeader(req) })
+  )
+);
 
-app.listen(3000, ()=> console.log("Gateway running"))
+// ── Health ────────────────────────────────────────────────────────
+app.get("/health", (req, res) => res.json({ status: "gateway running" }));
+
+// ── Start ─────────────────────────────────────────────────────────
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`API Gateway running on port ${PORT}`));
+
+module.exports = app;
