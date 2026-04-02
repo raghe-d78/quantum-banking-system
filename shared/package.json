@@ -1,5 +1,16 @@
 {
+  "name": "shared",
+  "version": "1.0.0",
+  "description": "Shared utilities for Quantum Banking System",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest tests/"
+  },
   "dependencies": {
+    "decimal.js": "^10.6.0",
     "pg": "^8.20.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }
