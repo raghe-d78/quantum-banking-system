@@ -1,0 +1,25 @@
+{
+  "name": "ledger-service",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "jest tests/unit tests/api",
+    "test:integration": "jest tests/integration"
+  },
+  "jest": {
+    "moduleNameMapper": {
+      "^../../../shared/db$": "<rootDir>/../../shared/db/index.js"
+    }
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "decimal.js": "^10.4.3",
+    "dotenv": "^16.0.0",
+    "express": "^4.19.0",
+    "jsonwebtoken": "^9.0.0"
+  },
+  "devDependencies": {
+    "jest": "^29.0.0",
+    "supertest": "^6.0.0"
+  }
+}

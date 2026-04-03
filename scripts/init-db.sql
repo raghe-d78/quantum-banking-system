@@ -38,3 +38,19 @@ CREATE TABLE IF NOT EXISTS accounts (
   currency   VARCHAR(10)    NOT NULL DEFAULT 'TND',
   created_at TIMESTAMP      DEFAULT CURRENT_TIMESTAMP
 );
+USE ledger_db;
+ 
+CREATE TABLE IF NOT EXISTS ledger_entries (
+  id               UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id       UUID           NOT NULL,
+  type             VARCHAR(10)    NOT NULL CHECK (type IN ('CREDIT', 'DEBIT')),
+  amount           DECIMAL(15, 4) NOT NULL CHECK (amount > 0),
+  balance_snapshot DECIMAL(15, 4) NOT NULL,
+  reference        VARCHAR(100),
+  created_at       TIMESTAMP      DEFAULT NOW()
+);
+ 
+-- Index for fast lookup by account + chronological order
+CREATE INDEX IF NOT EXISTS idx_ledger_account_created
+  ON ledger_entries (account_id, created_at ASC);
+ 
