@@ -39,8 +39,14 @@ const authHeader = (req) => ({
 });
 
 // ── AUTH → identity-service ───────────────────────────────────────
-app.post("/auth/login", (req, res) =>
-  proxy(res, () => axios.post(`${IDENTITY}/auth/login`, req.body))
+// Customer login
+app.post("/auth/customer/login", (req, res) =>
+  proxy(res, () => axios.post(`${IDENTITY}/auth/customer/login`, req.body))
+);
+
+// Staff login
+app.post("/auth/staff/login", (req, res) =>
+  proxy(res, () => axios.post(`${IDENTITY}/auth/staff/login`, req.body))
 );
 
 app.get("/auth/me", (req, res) =>

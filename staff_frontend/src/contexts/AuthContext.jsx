@@ -12,21 +12,27 @@ export function AuthProvider({ children }) {
   const [error, setError] = useState(null);
 
   const login = async (username, password) => {
-    setError(null);
-    try {
-      const { data } = await api.post("/auth/login", { username, password });
-      
-      localStorage.setItem("token", data.token);
-      localStorage.setItem("user", JSON.stringify(data.user));
-      setUser(data.user);
-      return data.user;
-    } catch (err) {
-      const message =
-        err.response?.data?.message ?? "Invalid credentials. Please try again.";
-      setError(message);
-      return null;
-    }
-  };
+  setError(null);
+
+  try {
+    const { data } = await api.post("/auth/staff/login", {
+      username,
+      password,
+    });
+
+    localStorage.setItem("token", data.token);
+    localStorage.setItem("user", JSON.stringify(data.user));
+
+    setUser(data.user);
+    return data.user;
+
+  } catch (err) {
+    const message =
+      err.response?.data?.message ?? "Invalid credentials. Please try again.";
+    setError(message);
+    return null;
+  }
+};
 
   const logout = () => {
     localStorage.removeItem("token");

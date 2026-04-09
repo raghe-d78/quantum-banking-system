@@ -25,7 +25,7 @@ const safeUser = (user) => ({
 })
 
 // ── Login ──────────────────────────────────────────────────────────
-exports.login = async ({ username, password }) => {
+exports.login = async ({ username, password, role }) => {
   if (!username || !password)
     throw new Error("Username and password are required")
 
@@ -35,8 +35,13 @@ exports.login = async ({ username, password }) => {
 
   if (!user) throw new Error("Invalid credentials")
 
+  // 🔒 NEW: role check (only if provided)
+  if (role && user.role !== role) {
+    throw new Error("Access denied for this user type")
+  }
+
   const valid = await bcrypt.compare(password, user.password_hash)
-  if (!valid)  throw new Error("Invalid credentials")
+  if (!valid) throw new Error("Invalid credentials")
 
   const token = signToken(user)
   return { token, user: safeUser(user) }
