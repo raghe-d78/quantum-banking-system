@@ -3,7 +3,8 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import BalancePage from "../pages/BalancePage";
-
+import WithdrawPage from "../pages/WithdrawPage";
+import TransactionHistory from "../pages/HistoryPage";
 const CustomerDashboard = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -27,6 +28,9 @@ const CustomerDashboard = () => {
     { key: "investments", icon: "▦", label: "Investments", group: "Services" },
     { key: "support",     icon: "◎", label: "Support",     group: "Help"     },
     { key: "settings",    icon: "⚙", label: "Settings",    group: "Help"     },
+    { key:"withdraw", icon:"↑", label:"Withdraw", group:"Account" },
+    { key:"History", icon:"🔄", label:"History", group:"Account" },
+
   ];
 
   const groups = [...new Set(menuItems.map(i => i.group))];
@@ -144,8 +148,10 @@ const CustomerDashboard = () => {
           </div>
 
           {activeMenu === "balance" && <BalancePage />}
+          {activeMenu === "withdraw" && <WithdrawPage />}
+          {activeMenu === "History" && <TransactionHistory />}
 
-          {activeMenu !== "balance" && (
+          {activeMenu !== "balance" && activeMenu !== "withdraw" && activeMenu !== "History" && (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "55vh", flexDirection: "column", gap: 16 }}>
               <div style={{ fontSize: 52, color: "#e8e2d8" }}>{menuItems.find(i => i.key === activeMenu)?.icon}</div>
               <div style={{ color: "#aaa", fontSize: 14, letterSpacing: 1 }}>
