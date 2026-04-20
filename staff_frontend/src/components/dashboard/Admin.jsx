@@ -4,7 +4,8 @@ import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
 import RegisterForm from "../../pages/RegisterForm";
 import DepositPage  from "../../pages/DepositPage";
-
+import UpdateProfilePage from "../../pages/UpdateProfilePage";
+import UsersPage from "../../pages/UsersPage";
 const tk = {
   navy: "#0a1628", navyMid: "#1a3a6b", gold: "#c9a84c", goldLight: "#e8d48b",
   cream: "#f5f3ef", creamBorder: "#e8e2d8", muted: "#aaa",
@@ -24,8 +25,10 @@ const AdminDashboardComponent = () => {
     // User Management (Admin only)
     { key: "create-user",     icon: "✦",  label: "Create User",          group: "User Management" },
     { key: "consult-users",   icon: "◈",  label: "Consult Users",        group: "User Management" },
+    { key: "profile",  icon: "◈", label: "My Profile",  group: "Account" },
+    { key: "consult-users", icon: "◈", label: "Consult Users", group: "User Management" },
+
     // Operations
-    { key: "deposit",         icon: "↓",  label: "Deposit",              group: "Operations" },
     // Fraud (Admin)
     { key: "fraud-notif",     icon: "⚠",  label: "Fraud Notifications",  group: "Fraud" },
     { key: "fraud-tx",        icon: "◉",  label: "Fraud Transactions",   group: "Fraud" },
@@ -125,8 +128,10 @@ const AdminDashboardComponent = () => {
           </div>
 
           {activeMenu === "create-user" && <RegisterForm />}
-          {activeMenu === "deposit"     && <DepositPage />}
-          {activeMenu !== "create-user" && activeMenu !== "deposit" && (
+              
+              {activeMenu === "profile"     && <UpdateProfilePage />}
+              {activeMenu === "consult-users" && <UsersPage />}
+              {activeMenu !== "create-user"  && activeMenu !== "profile" && activeMenu !== "consult-users" && (
             <Placeholder icon={menuItems.find(i=>i.key===activeMenu)?.icon} label={menuItems.find(i=>i.key===activeMenu)?.label} />
           )}
         </main>

@@ -5,6 +5,8 @@ import LoginPage          from "./pages/LoginPage";
 import AdminDashboard     from "./components/dashboard/Admin";
 import EmployeeDashboard  from "./components/dashboard/EmployeeDashboard";
 import ProtectedRoute     from "./components/ProtectedRoute";
+import UsersPage from "./pages/UsersPage";
+import EditUserPage from "./pages/edituserpage";
 
 export default function App() {
   return (
@@ -23,6 +25,7 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+          
 
           {/* Employee */}
           <Route

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
 import DepositPage from "../../pages/DepositPage";
-
+import UpdateProfilePage from "../../pages/UpdateProfilePage";
 const tk = {
   navy: "#0a1628", navyMid: "#1a3a6b", gold: "#c9a84c", goldLight: "#e8d48b",
   cream: "#f5f3ef", creamBorder: "#e8e2d8", muted: "#aaa",
@@ -21,6 +21,8 @@ const EmployeeDashboard = () => {
 
   const menuItems = [
     { key: "deposit",         icon: "↓",  label: "Deposit",              group: "Operations" },
+    { key: "profile",  icon: "◈", label: "My Profile",  group: "Account" },
+
     { key: "fraud-notif",     icon: "⚠",  label: "Fraud Notifications",  group: "Fraud" },
     { key: "treat-fraud",     icon: "◉",  label: "Treat Fraud",          group: "Fraud" },
     { key: "fraud-stats",     icon: "▦",  label: "Fraud Statistics",     group: "Fraud" },
@@ -117,7 +119,10 @@ const EmployeeDashboard = () => {
           </div>
 
           {activeMenu === "deposit"     && <DepositPage />}
-          {activeMenu !== "deposit"     && <Placeholder icon={menuItems.find(i=>i.key===activeMenu)?.icon} label={menuItems.find(i=>i.key===activeMenu)?.label} />}
+          {activeMenu === "profile"     && <UpdateProfilePage />}
+          {activeMenu !== "deposit" && activeMenu !== "profile" && (
+            <Placeholder icon={menuItems.find(i=>i.key===activeMenu)?.icon} label={menuItems.find(i=>i.key===activeMenu)?.label} />
+          )}
         </main>
       </div>
     </div>
