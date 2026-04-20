@@ -5,6 +5,8 @@ import { useAuth } from "../contexts/AuthContext";
 import BalancePage from "../pages/BalancePage";
 import WithdrawPage from "../pages/WithdrawPage";
 import TransactionHistory from "../pages/HistoryPage";
+import TransferPage from "../pages/TransferPage";
+import UpdateProfilePage from "../pages/UpdateProfilePage";
 const CustomerDashboard = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -22,14 +24,10 @@ const CustomerDashboard = () => {
 
   const menuItems = [
     { key: "balance",     icon: "◈", label: "My Balance",  group: "Account"  },
-    { key: "transfer",    icon: "⇄", label: "Transfer",    group: "Account"  },
-    { key: "cards",       icon: "▭", label: "My Cards",    group: "Account"  },
-    { key: "loans",       icon: "◐", label: "My Loans",    group: "Services" },
-    { key: "investments", icon: "▦", label: "Investments", group: "Services" },
-    { key: "support",     icon: "◎", label: "Support",     group: "Help"     },
-    { key: "settings",    icon: "⚙", label: "Settings",    group: "Help"     },
     { key:"withdraw", icon:"↑", label:"Withdraw", group:"Account" },
     { key:"History", icon:"🔄", label:"History", group:"Account" },
+    { key: "transfer", icon: "⇄", label: "Transfer",    group: "Account" },
+    { key: "profile",  icon: "◈", label: "My Profile",  group: "Account" },
 
   ];
 
@@ -150,15 +148,10 @@ const CustomerDashboard = () => {
           {activeMenu === "balance" && <BalancePage />}
           {activeMenu === "withdraw" && <WithdrawPage />}
           {activeMenu === "History" && <TransactionHistory />}
+          {activeMenu === "transfer" && <TransferPage />}
+          {activeMenu === "profile" && <UpdateProfilePage />}
 
-          {activeMenu !== "balance" && activeMenu !== "withdraw" && activeMenu !== "History" && (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "55vh", flexDirection: "column", gap: 16 }}>
-              <div style={{ fontSize: 52, color: "#e8e2d8" }}>{menuItems.find(i => i.key === activeMenu)?.icon}</div>
-              <div style={{ color: "#aaa", fontSize: 14, letterSpacing: 1 }}>
-                {menuItems.find(i => i.key === activeMenu)?.label} — Coming Soon
-              </div>
-            </div>
-          )}
+          
         </main>
       </div>
     </div>
