@@ -19,8 +19,8 @@ app.options("*", cors({ origin: allowedOrigins }));
 app.use(express.json());
 
 // ── Service URLs ──────────────────────────────────────────────────
-const IDENTITY = process.env.IDENTITY_SERVICE_URL || "http://identity-service:3001";
-const ACCOUNT  = process.env.ACCOUNT_SERVICE_URL  || "http://account-service:3002";
+const IDENTITY_SERVICE_URL = process.env.IDENTITY_SERVICE_URL || "http://identity-service:3001";
+const ACCOUNT_SERVICE_URL  = process.env.ACCOUNT_SERVICE_URL  || "http://account-service:3002";
 
 // ── Proxy helper ──────────────────────────────────────────────────
 const proxy = async (res, fn) => {
@@ -40,44 +40,44 @@ const authHeader = (req) => ({
 
 // ── AUTH → identity-service ───────────────────────────────────────
 app.post("/auth/login", (req, res) =>
-  proxy(res, () => axios.post(`${IDENTITY}/auth/login`, req.body))
+  proxy(res, () => axios.post(`${IDENTITY_SERVICE_URL}/auth/login`, req.body))
 );
 
 app.get("/auth/me", (req, res) =>
   proxy(res, () =>
-    axios.get(`${IDENTITY}/auth/me`, { headers: authHeader(req) })
+    axios.get(`${IDENTITY_SERVICE_URL}/auth/me`, { headers: authHeader(req) })
   )
 );
 
 // ── ADMIN → identity-service ──────────────────────────────────────
 app.post("/admin/users", (req, res) =>
   proxy(res, () =>
-    axios.post(`${IDENTITY}/admin/users`, req.body, { headers: authHeader(req) })
+    axios.post(`${IDENTITY_SERVICE_URL}/admin/users`, req.body, { headers: authHeader(req) })
   )
 );
 
 // ── ACCOUNT → account-service ─────────────────────────────────────
 app.get("/balance", (req, res) =>
   proxy(res, () =>
-    axios.get(`${ACCOUNT}/balance`, { headers: authHeader(req) })
+    axios.get(`${ACCOUNT_SERVICE_URL}/balance`, { headers: authHeader(req) })
   )
 );
 
 app.get("/transactions", (req, res) =>
   proxy(res, () =>
-    axios.get(`${ACCOUNT}/transactions`, { headers: authHeader(req) })
+    axios.get(`${ACCOUNT_SERVICE_URL}/transactions`, { headers: authHeader(req) })
   )
 );
 
 app.get("/transactions/:id", (req, res) =>
   proxy(res, () =>
-    axios.get(`${ACCOUNT}/transactions/${req.params.id}`, { headers: authHeader(req) })
+    axios.get(`${ACCOUNT_SERVICE_URL}/transactions/${req.params.id}`, { headers: authHeader(req) })
   )
 );
 
 app.post("/transactions", (req, res) =>
   proxy(res, () =>
-    axios.post(`${ACCOUNT}/transactions`, req.body, { headers: authHeader(req) })
+    axios.post(`${ACCOUNT_SERVICE_URL}/transactions`, req.body, { headers: authHeader(req) })
   )
 );
 

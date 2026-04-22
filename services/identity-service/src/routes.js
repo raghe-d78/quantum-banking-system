@@ -13,6 +13,7 @@ router.post("/auth/login", async (req, res) => {
     const result = await authService.login(req.body)
     res.json(result)
   } catch (err) {
+    console.error("Error in /auth/login:", err)
     res.status(401).json({ message: err.message })
   }
 })
@@ -27,6 +28,7 @@ router.post("/admin/users", authenticate, requireAdmin, async (req, res) => {
     const result = await authService.createUser(req.body)
     res.status(201).json(result)
   } catch (err) {
+    console.error("Error in /admin/users:", err)
     res.status(400).json({ message: err.message })
   }
 })
@@ -41,6 +43,7 @@ router.get("/auth/me", authenticate, async (req, res) => {
     if (!user) return res.status(404).json({ message: "User not found" })
     res.json({ user })
   } catch (err) {
+    console.error("Error in /auth/me:", err)
     res.status(500).json({ message: err.message })
   }
 })

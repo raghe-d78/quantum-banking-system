@@ -51,7 +51,7 @@ const BalancePage = () => {
       {/* Balance Cards */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 20, marginBottom: 32 }}>
         {[
-          { label: "Total Balance",     value: accountData.balance,   highlight: true  },
+          { label: "Total Balance",     value: accountData.cached_balance,   highlight: true  },
           { label: "Available Balance", value: accountData.available, highlight: false },
           { label: "Pending",           value: accountData.pending,   highlight: false },
         ].map((card) => (

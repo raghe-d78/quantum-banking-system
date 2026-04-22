@@ -5,9 +5,7 @@ WORKDIR /app
 COPY services/account-service/package*.json ./
 RUN npm install
 
-COPY services/account-service ./services/account-service
-COPY shared ./shared
-
-WORKDIR /app/services/account-service
+COPY services/account-service ./
+COPY shared ../shared
 
 CMD ["node", "src/server.js"]

@@ -3,17 +3,17 @@ const createPool = require("/shared/db")
 
 const pool = createPool("account_db")
 
-exports.create = async ({ userId, currency = "TND" }) => {
+const create = async ({ userId, currency = "TND" }) => {
   const result = await pool.query(
-    `INSERT INTO accounts (user_id, balance, currency)
+    `INSERT INTO accounts (user_id, cached_balance, currency)
      VALUES ($1, 0.000, $2)
-     RETURNING id, user_id, balance, currency, created_at`,
+     RETURNING id, user_id, cached_balance, currency, created_at`,
     [userId, currency]
   )
   return result.rows[0]
 }
 
-exports.findByUserId = async (userId) => {
+const findByUserId = async (userId) => {
   const result = await pool.query(
     "SELECT * FROM accounts WHERE user_id = $1",
     [userId]
@@ -21,7 +21,7 @@ exports.findByUserId = async (userId) => {
   return result.rows[0]
 }
 
-exports.findById = async (id) => {
+const findById = async (id) => {
   const result = await pool.query(
     "SELECT * FROM accounts WHERE id = $1",
     [id]
@@ -29,7 +29,7 @@ exports.findById = async (id) => {
   return result.rows[0]
 }
 
-exports.getAccountForUpdate = async (client, accountId) => {
+const getAccountForUpdate = async (client, accountId) => {
   const result = await client.query(
     "SELECT * FROM accounts WHERE id=$1 FOR UPDATE",
     [accountId]
@@ -38,9 +38,18 @@ exports.getAccountForUpdate = async (client, accountId) => {
 }
 
 
-exports.updateBalance = async (client, accountId, newBalance) => {
+const updateBalance = async (client, accountId, newBalance) => {
   await client.query(
-    "UPDATE accounts SET balance=$1 WHERE id=$2",
+    "UPDATE accounts SET cached_balance=$1 WHERE id=$2",
     [newBalance, accountId]
   )
+}
+
+module.exports = {
+  pool,
+  getAccountForUpdate,
+  updateBalance,
+  create,
+  findByUserId,
+  findById,
 }

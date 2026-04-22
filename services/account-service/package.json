@@ -12,11 +12,12 @@
     "cors": "^2.8.6",
     "dotenv": "^16.0.0",
     "express": "^4.19.0",
-    "jsonwebtoken": "^9.0.0"
+    "jsonwebtoken": "^9.0.0",
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "nodemon": "^3.0.0",
+    "nodemon": "^3.1.14",
     "supertest": "^6.0.0"
   }
 }

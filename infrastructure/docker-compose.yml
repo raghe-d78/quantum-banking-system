@@ -48,7 +48,20 @@ services:
     depends_on:
       cockroachdb:
         condition: service_healthy
-
+  ledger-service:
+    build:
+      context: ..
+      dockerfile: services/ledger-service/Dockerfile
+    ports:
+      - "3003:3003"
+    environment:
+      - PORT=3003
+      - DB_HOST=cockroachdb
+      - DB_PORT=26257
+      - DB_NAME=ledger_db
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
   api-gateway:
     build: ../services/api-gateway
     ports:

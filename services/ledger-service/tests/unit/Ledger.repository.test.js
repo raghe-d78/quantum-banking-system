@@ -1,6 +1,6 @@
 // services/ledger-service/tests/unit/Ledger.repository.test.js
 const mockPool = { query: jest.fn() };
-jest.mock("../../../shared/db", () => () => mockPool);
+jest.mock("/shared/db", () => () => mockPool);
 
 const ledgerRepo = require("../../src/Ledger.repository");
 

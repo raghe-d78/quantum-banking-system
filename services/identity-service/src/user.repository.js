@@ -1,5 +1,5 @@
 // identity-service/src/user.repository.js
-const createPool = require("../../../shared/db")
+const createPool = require("/shared/db")
 
 const pool = createPool("identity_db")
 

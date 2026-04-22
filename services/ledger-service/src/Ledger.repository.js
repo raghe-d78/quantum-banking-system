@@ -1,7 +1,7 @@
 // services/ledger-service/src/Ledger.repository.js
 // APPEND-ONLY — no UPDATE or DELETE methods exist by design
 
-const createPool = require("../../../shared/db");
+const createPool = require("/shared/db");
 const pool = createPool("ledger_db");         
 
 const VALID_TYPES = ["CREDIT", "DEBIT"];

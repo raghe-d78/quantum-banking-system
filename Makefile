@@ -1,7 +1,11 @@
 COMPOSE_FILE = infrastructure/docker-compose.yml
+COMPOSE_FILE_DEV = infrastructure/docker-compose.dev.yml
 
 up:
 	docker compose -f $(COMPOSE_FILE) up --build
+dev:
+	docker compose -f $(COMPOSE_FILE) -f $(COMPOSE_FILE_DEV) up --build
+
 
 down:
 	docker compose -f $(COMPOSE_FILE) down

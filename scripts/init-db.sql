@@ -24,7 +24,7 @@ VALUES (
   'adminn',
   'admin@banquee.tn',
   'System Admin',
-  '$2a$12$ZmfuN1zs1lUflMZxvnhwMe8MNvNGKhKDKhMRQhuHRal7wt8Awnv4e',
+  '$2a$12$ZmfuN1zs1lUflMZxvnhwMe8MNvNGKhKDKhMRQhuHRal7wt8Awnv4e',  -- hash of "admin123"
   'admin'
 ) ON CONFLICT (email) DO NOTHING;
 
@@ -34,7 +34,7 @@ USE account_db;
 CREATE TABLE IF NOT EXISTS accounts (
   id         UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id    UUID           NOT NULL UNIQUE,
-  balance    DECIMAL(15, 3) NOT NULL DEFAULT 0.000,
+  cached_balance            DECIMAL(15, 3) NOT NULL DEFAULT 0.000,
   currency   VARCHAR(10)    NOT NULL DEFAULT 'TND',
   created_at TIMESTAMP      DEFAULT CURRENT_TIMESTAMP
 );
@@ -42,6 +42,7 @@ USE ledger_db;
  
 CREATE TABLE IF NOT EXISTS ledger_entries (
   id               UUID           PRIMARY KEY DEFAULT gen_random_uuid(),
+  transaction_id   UUID           NOT NULL,
   account_id       UUID           NOT NULL,
   type             VARCHAR(10)    NOT NULL CHECK (type IN ('CREDIT', 'DEBIT')),
   amount           DECIMAL(15, 4) NOT NULL CHECK (amount > 0),
