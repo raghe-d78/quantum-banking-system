@@ -8,9 +8,28 @@ const { authenticate, requireAdmin } = require("./middleware/auth.middleware")
 
 // POST /auth/login  { username, password }
 // Returns { token, user: { id, username, email, name, role } }
-router.post("/auth/login", async (req, res) => {
+// STAFF LOGIN (admin, employee)
+router.post("/auth/staff/login", async (req, res) => {
   try {
     const result = await authService.login(req.body)
+
+    // ✅ Allow both admin and employee
+    if (!["admin", "employee"].includes(result.user.role)) {
+      return res.status(403).json({ message: "Access denied: staff only" })
+    }
+
+    res.json(result)
+  } catch (err) {
+    res.status(401).json({ message: err.message })
+  }
+})
+// CUSTOMER LOGIN
+router.post("/auth/customer/login", async (req, res) => {
+  try {
+    const result = await authService.login({
+      ...req.body,
+      role: "customer"
+    })
     res.json(result)
   } catch (err) {
     console.error("Error in /auth/login:", err)

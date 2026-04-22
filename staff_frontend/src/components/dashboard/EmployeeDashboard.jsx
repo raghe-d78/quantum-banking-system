@@ -1,41 +1,32 @@
-// staff_frontend/src/components/dashboard/AdminDashboard.jsx
+// staff_frontend/src/components/dashboard/EmployeeDashboard.jsx
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../../contexts/AuthContext";
-import RegisterForm from "../../pages/RegisterForm";
-import DepositPage  from "../../pages/DepositPage";
+import DepositPage from "../../pages/DepositPage";
 import UpdateProfilePage from "../../pages/UpdateProfilePage";
-import UsersPage from "../../pages/UsersPage";
 const tk = {
   navy: "#0a1628", navyMid: "#1a3a6b", gold: "#c9a84c", goldLight: "#e8d48b",
   cream: "#f5f3ef", creamBorder: "#e8e2d8", muted: "#aaa",
 };
 
-const AdminDashboardComponent = () => {
+const EmployeeDashboard = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [collapsed,  setCollapsed]  = useState(false);
-  const [activeMenu, setActiveMenu] = useState("create-user");
+  const [activeMenu, setActiveMenu] = useState("deposit");
 
   const handleLogout = () => { logout(); navigate("/login", { replace: true }); };
-  const displayName  = user?.name ?? user?.username ?? "Admin";
+  const displayName  = user?.name ?? user?.username ?? "Employee";
   const initials     = displayName.split(" ").map(w => w[0]).join("").slice(0, 2).toUpperCase();
 
   const menuItems = [
-    // User Management (Admin only)
-    { key: "create-user",     icon: "✦",  label: "Create User",          group: "User Management" },
-    { key: "consult-users",   icon: "◈",  label: "Consult Users",        group: "User Management" },
+    { key: "deposit",         icon: "↓",  label: "Deposit",              group: "Operations" },
     { key: "profile",  icon: "◈", label: "My Profile",  group: "Account" },
-    { key: "consult-users", icon: "◈", label: "Consult Users", group: "User Management" },
 
-    // Operations
-    // Fraud (Admin)
     { key: "fraud-notif",     icon: "⚠",  label: "Fraud Notifications",  group: "Fraud" },
-    { key: "fraud-tx",        icon: "◉",  label: "Fraud Transactions",   group: "Fraud" },
-    { key: "suspend-account", icon: "⊘",  label: "Suspend Account",      group: "Fraud" },
-    // Reports (Admin only)
-    { key: "report",          icon: "▦",  label: "Generate Report",      group: "Reports" },
-    { key: "fraud-stats",     icon: "◐",  label: "Fraud Statistics",     group: "Reports" },
+    { key: "treat-fraud",     icon: "◉",  label: "Treat Fraud",          group: "Fraud" },
+    { key: "fraud-stats",     icon: "▦",  label: "Fraud Statistics",     group: "Fraud" },
+    { key: "report",          icon: "◈",  label: "Generate Report",      group: "Reports" },
   ];
 
   const groups = [...new Set(menuItems.map(i => i.group))];
@@ -59,7 +50,7 @@ const AdminDashboardComponent = () => {
           {!collapsed && (
             <div>
               <div style={{ color:tk.goldLight, fontSize:15, fontWeight:600, letterSpacing:1.5, textTransform:"uppercase" }}>Banque</div>
-              <div style={{ color:"rgba(255,255,255,0.4)", fontSize:10, letterSpacing:2, textTransform:"uppercase" }}>Admin Portal</div>
+              <div style={{ color:"rgba(255,255,255,0.4)", fontSize:10, letterSpacing:2, textTransform:"uppercase" }}>Employee Portal</div>
             </div>
           )}
         </div>
@@ -101,14 +92,14 @@ const AdminDashboardComponent = () => {
         {/* Header */}
         <header style={{ background:"#fff", borderBottom:`1px solid ${tk.creamBorder}`, padding:"0 32px", height:64, display:"flex", alignItems:"center", justifyContent:"space-between", boxShadow:"0 2px 8px rgba(0,0,0,0.06)", flexShrink:0 }}>
           <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-            <span style={{ color:tk.muted, fontSize:12 }}>Admin</span>
+            <span style={{ color:tk.muted, fontSize:12 }}>Employee</span>
             <span style={{ color:"#ccc" }}>›</span>
             <span style={{ color:tk.navy, fontSize:12, fontWeight:600 }}>{menuItems.find(i => i.key===activeMenu)?.label}</span>
           </div>
           <div style={{ display:"flex", alignItems:"center", gap:16 }}>
             <div style={{ textAlign:"right" }}>
               <div style={{ fontSize:12, fontWeight:600, color:tk.navy }}>{displayName}</div>
-              <div style={{ fontSize:10, color:tk.muted, letterSpacing:0.5 }}>Admin · Tunis</div>
+              <div style={{ fontSize:10, color:tk.muted, letterSpacing:0.5 }}>Employee · Tunis</div>
             </div>
             <div style={{ width:36, height:36, borderRadius:"50%", background:`linear-gradient(135deg, ${tk.navy}, ${tk.navyMid})`, display:"flex", alignItems:"center", justifyContent:"center", color:tk.goldLight, fontSize:13, fontWeight:700 }}>{initials}</div>
             <button onClick={handleLogout} style={{ background:"none", border:`1px solid ${tk.creamBorder}`, borderRadius:8, color:tk.muted, fontSize:11, padding:"6px 12px", cursor:"pointer", letterSpacing:0.5 }}>Sign out</button>
@@ -127,11 +118,9 @@ const AdminDashboardComponent = () => {
             </p>
           </div>
 
-          {activeMenu === "create-user" && <RegisterForm />}
-              
-              {activeMenu === "profile"     && <UpdateProfilePage />}
-              {activeMenu === "consult-users" && <UsersPage />}
-              {activeMenu !== "create-user"  && activeMenu !== "profile" && activeMenu !== "consult-users" && (
+          {activeMenu === "deposit"     && <DepositPage />}
+          {activeMenu === "profile"     && <UpdateProfilePage />}
+          {activeMenu !== "deposit" && activeMenu !== "profile" && (
             <Placeholder icon={menuItems.find(i=>i.key===activeMenu)?.icon} label={menuItems.find(i=>i.key===activeMenu)?.label} />
           )}
         </main>
@@ -140,4 +129,4 @@ const AdminDashboardComponent = () => {
   );
 };
 
-export default AdminDashboardComponent;
+export default EmployeeDashboard;
