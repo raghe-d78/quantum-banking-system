@@ -68,8 +68,8 @@ def _derive_key(bits: List[int]) -> bytes:
         import os
         return os.urandom(32)
 
-    # Pack bits into bytes
-    padded = bits + [0] * ((-len(bits)) % 8)
+    # Pack bits into bytes, padding to the next multiple of 8
+    padded = bits + [0] * ((8 - len(bits) % 8) % 8)
     byte_val = int("".join(str(b) for b in padded), 2).to_bytes(len(padded) // 8, "big")
     return hashlib.sha256(byte_val).digest()
 
