@@ -1,0 +1,33 @@
+# Prometheus configuration for Quantum Banking System
+# Scrapes Prometheus itself and leaves room for future service targets.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Future targets — uncomment and extend as services expose /metrics
+  # - job_name: "quantum-service"
+  #   static_configs:
+  #     - targets: ["quantum-service:8000"]
+  #
+  # - job_name: "qkd-kms"
+  #   static_configs:
+  #     - targets: ["qkd-kms:8001"]
+  #
+  # - job_name: "api-gateway"
+  #   static_configs:
+  #     - targets: ["api-gateway:3000"]
+  #
+  # - job_name: "identity-service"
+  #   static_configs:
+  #     - targets: ["identity-service:3001"]
+  #
+  # - job_name: "account-service"
+  #   static_configs:
+  #     - targets: ["account-service:3002"]

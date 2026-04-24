@@ -46,3 +46,18 @@ test-identity:
 
 account:
 	docker compose -f $(COMPOSE_FILE) up account-service
+
+quantum:
+	docker compose -f $(COMPOSE_FILE) up quantum-service
+
+qkd:
+	docker compose -f $(COMPOSE_FILE) up qkd-kms
+
+infra:
+	docker compose -f $(COMPOSE_FILE) up redis kafka zookeeper prometheus grafana nginx
+
+test-quantum:
+	cd services/quantum-service && pip install -r requirements.txt -q && pytest -q
+
+test-qkd:
+	cd services/qkd-kms && pip install -r requirements.txt -q && pytest -q
