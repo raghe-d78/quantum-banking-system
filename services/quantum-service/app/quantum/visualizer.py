@@ -9,9 +9,11 @@ import io
 import logging
 from typing import Dict
 
+# Set non-interactive backend BEFORE any other matplotlib imports
 import matplotlib
-matplotlib.use("Agg")  # non-interactive backend for server use
+matplotlib.use("Agg")
 
+import matplotlib.pyplot as plt  # noqa: E402
 from qiskit import QuantumCircuit
 from qiskit.visualization import circuit_drawer
 
@@ -81,7 +83,6 @@ class CircuitVisualizer:
         try:
             fig = circuit_drawer(qc, output="mpl", plot_barriers=False)
             fig.savefig(buf, format="png", bbox_inches="tight")
-            import matplotlib.pyplot as plt
             plt.close(fig)
         except Exception as exc:  # noqa: BLE001
             logger.warning("mpl render failed (%s); falling back to text→PNG", exc)

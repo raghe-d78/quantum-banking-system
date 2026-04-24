@@ -72,8 +72,8 @@ class VQCClassifier:
         """Construct and return an untrained VQC instance."""
         try:
             from qiskit.circuit.library import RealAmplitudes, ZZFeatureMap
+            from qiskit_algorithms.optimizers import COBYLA
             from qiskit_machine_learning.algorithms import VQC
-            from qiskit_aer import AerSimulator
             from qiskit_aer.primitives import Sampler as AerSampler
 
             feature_map = ZZFeatureMap(feature_dimension=num_features, reps=2)
@@ -83,7 +83,7 @@ class VQCClassifier:
                 sampler=sampler,
                 feature_map=feature_map,
                 ansatz=ansatz,
-                optimizer={"maxiter": 100},
+                optimizer=COBYLA(maxiter=100),
             )
             return vqc
         except ImportError as exc:
