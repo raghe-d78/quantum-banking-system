@@ -101,10 +101,20 @@ class VQCClassifier:
         if self._vqc is not None:
             return
         if os.path.exists(self._model_path):
+            # Security note: only load from the configured safe path, not user-supplied input.
+            # The model path is controlled by the VQC_MODEL_PATH env var (trusted config),
+            # not from any HTTP request, so the attack surface is limited to the deployment
+            # environment. For additional hardening, consider signed/encrypted model files.
+            safe_path = os.path.realpath(self._model_path)
+            allowed_dir = os.path.realpath(os.path.dirname(self._model_path) or ".")
+            if not safe_path.startswith(allowed_dir):
+                logger.error("Refusing to load model from unexpected path: %s", safe_path)
+                self._train_default()
+                return
             try:
-                with open(self._model_path, "rb") as fh:
+                with open(safe_path, "rb") as fh:
                     self._vqc = pickle.load(fh)  # noqa: S301
-                logger.info("VQC model loaded from %s", self._model_path)
+                logger.info("VQC model loaded from %s", safe_path)
                 return
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Failed to load persisted VQC (%s); retraining.", exc)

@@ -16,6 +16,8 @@ jobs:
   test-quantum-service:
     name: quantum-service tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -41,6 +43,8 @@ jobs:
   test-qkd-kms:
     name: qkd-kms tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -66,6 +70,8 @@ jobs:
   docker-build-quantum:
     name: Docker build quantum services
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     needs: [test-quantum-service, test-qkd-kms]
 
     steps:
