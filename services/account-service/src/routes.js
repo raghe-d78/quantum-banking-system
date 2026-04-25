@@ -2,7 +2,8 @@
 const express     = require("express")
 const router      = express.Router()
 const accountService = require("./account.service")
-const { authenticate, requireAdmin } = require("./middleware/auth.middleware")
+const accountRepo = require("./account.repository")
+const { authenticate, requireAdmin, requireStaff } = require("./middleware/auth.middleware")
 
 // POST /accounts/create
 // Called internally by identity-service when a new customer is created
@@ -32,7 +33,7 @@ router.get("/balance", authenticate, async (req, res) => {
 
 
 // POST /deposit
-router.post("/deposit", authenticate, async (req, res) => {
+router.post("/deposit", authenticate, requireStaff, async (req, res) => {
   try {
     const { accountId, amount } = req.body
 
@@ -44,6 +45,21 @@ router.post("/deposit", authenticate, async (req, res) => {
     res.status(400).json({
       error: err.message
     })
+  }
+})
+
+// verify account's existence (used by staff frontend)
+router.get("/admin/accounts/:accountId", authenticate, requireStaff, async (req, res) => {
+  try {
+    console.log("Admin checking account ID:", req.params.accountId)
+    const account = await accountRepo.findById(req.params.accountId)
+    if (!account) {
+      return res.status(404).json({ message: "Account not found" })
+    }
+    res.json({ name: account.username || account.name || "Customer" })
+  } catch (err) {
+    console.error("Error in /admin/accounts/:accountId:", err)
+    res.status(400).json({ message: err.message })
   }
 })
 

@@ -41,12 +41,12 @@ const authHeader = (req) => ({
 // ── AUTH → identity-service ───────────────────────────────────────
 // Customer login
 app.post("/auth/customer/login", (req, res) =>
-  proxy(res, () => axios.post(`${IDENTITY}/auth/customer/login`, req.body))
+  proxy(res, () => axios.post(`${IDENTITY_SERVICE_URL}/auth/customer/login`, req.body))
 );
 
 // Staff login
 app.post("/auth/staff/login", (req, res) =>
-  proxy(res, () => axios.post(`${IDENTITY}/auth/staff/login`, req.body))
+  proxy(res, () => axios.post(`${IDENTITY_SERVICE_URL}/auth/staff/login`, req.body))
 );
 
 app.get("/auth/me", (req, res) =>
@@ -84,6 +84,18 @@ app.get("/transactions/:id", (req, res) =>
 app.post("/transactions", (req, res) =>
   proxy(res, () =>
     axios.post(`${ACCOUNT_SERVICE_URL}/transactions`, req.body, { headers: authHeader(req) })
+  )
+);
+
+app.get("/admin/accounts/:accountId", (req, res) =>
+  proxy(res, () =>
+    axios.get(`${ACCOUNT_SERVICE_URL}/admin/accounts/${req.params.accountId}`, { headers: authHeader(req) })
+  )
+);
+
+app.post("/admin/deposit", (req, res) =>
+  proxy(res, () =>
+    axios.post(`${ACCOUNT_SERVICE_URL}/deposit`, req.body, { headers: authHeader(req) })
   )
 );
 

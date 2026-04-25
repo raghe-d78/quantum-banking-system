@@ -62,7 +62,8 @@ const DepositPage = () => {
       setError(null);
       const { data } = await api.get(`/admin/accounts/${accountId}`);
       setCustomerName(data.name ?? data.username ?? "Customer found");
-    } catch {
+    } catch (err){
+      console.error(err);
       setError("Account not found. Check the ID and try again.");
       setCustomerName("");
     } finally {
@@ -77,7 +78,7 @@ const DepositPage = () => {
     if (!amount || isNaN(parsed) || parsed <= 0) { setError("Enter a valid amount greater than 0."); return; }
     try {
       setLoading(true);
-      await api.post("/deposit", {
+      await api.post("/admin/deposit", {
         accountId,
         amount: parsed.toFixed(4),
         note:   note || null,
