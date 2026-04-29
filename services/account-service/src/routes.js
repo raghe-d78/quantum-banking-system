@@ -83,8 +83,19 @@ router.post("/deposit", authenticate, requireStaff, async (req, res) => {
     })
   }
 })
-// services/account-service/src/routes.js
-
+// POST /withdraw
+router.post("/withdraw", authenticate, async (req, res) => {
+  try {
+    const { amount, note } = req.body
+    const result = await accountService.withdraw(req.user.userId, amount, note)
+    res.json(result)
+  } catch (err) {
+    console.error("Error in /withdraw:", err)
+    res.status(400).json({
+      message: err.message
+    })
+  }
+})
 // POST /transfer
 router.post("/transfer", authenticate, async (req, res) => {
   try {
@@ -147,7 +158,7 @@ router.get("/admin/accounts/:accountId", authenticate, requireStaff, async (req,
     res.status(400).json({ message: err.message })
   }
 })
-// services/account-service/src/routes.js
+
 
 // ✅ Public endpoint for customers to verify recipient accounts
 router.get("/accounts/verify/:accountId", authenticate, async (req, res) => {
