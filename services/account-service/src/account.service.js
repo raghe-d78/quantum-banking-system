@@ -333,4 +333,4 @@ exports.withdraw = async (accountId, amount, note) => {
     accountClient.release()
     ledgerClient.release()
   }
-}
+};
