@@ -83,44 +83,7 @@ router.post("/deposit", authenticate, requireStaff, async (req, res) => {
     })
   }
 })
-// services/account-service/src/routes.js
 
-// POST /transfer
-router.post("/transfer", authenticate, async (req, res) => {
-  try {
-    const { sourceAccountId, destinationAccountId, amount, reference } = req.body;
-    
-    // Optional: override initiatedBy (default: authenticated user)
-    const initiatedBy = req.user?.role === "staff" ? req.user?.userId : null;
-    
-    const result = await accountService.transfer(
-      sourceAccountId,
-      destinationAccountId,
-      amount,
-      { reference, initiatedBy }
-    );
-    
-    res.status(200).json({
-      success: true,
-      data: result,
-    });
-    
-  } catch (err) {
-    console.error("Transfer error:", err.message);
-    
-    // Map errors to appropriate HTTP status codes
-    const status = 
-      err.message.includes("Insufficient funds") ? 400 :
-      err.message.includes("not found") ? 404 :
-      err.message.includes("Currency mismatch") ? 400 :
-      500;
-      
-    res.status(status).json({
-      success: false,
-      error: err.message,
-    });
-  }
-});
 // verify account's existence (used by staff frontend)
 router.get("/admin/accounts/:accountId", authenticate, requireStaff, async (req, res) => {
   try {
