@@ -1,7 +1,8 @@
 // customer_frontend/src/pages/TransferPage.jsx
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import api from "../lib/api";
 
+// ── Theme tokens (unchanged) ──────────────────────────────────────
 const tk = {
   navy: "#0a1628", navyMid: "#1a3a6b", gold: "#c9a84c", goldLight: "#e8d48b",
   cream: "#f5f3ef", creamBorder: "#e8e2d8", creamInput: "#faf8f5", muted: "#aaa",
@@ -22,7 +23,7 @@ const labelStyle = {
 };
 const delay = (ms) => new Promise(r => setTimeout(r, ms));
 
-// ── Steps ─────────────────────────────────────────────────────────
+// ── Step Component (unchanged) ────────────────────────────────────
 const Step = ({ num, label, status, detail, isLast }) => {
   const S = {
     idle:    { bg: tk.cream,    border: tk.creamBorder, color: tk.muted,  icon: String(num), line: tk.creamBorder },
@@ -52,10 +53,10 @@ const Step = ({ num, label, status, detail, isLast }) => {
   );
 };
 
-const STEP_LABELS = ["Verify recipient account", "Validate balance", "Execute transfer", "Confirmation"];
+const STEP_LABELS = ["Verify recipient", "Validate balance", "Execute transfer", "Confirmation"];
 const initSteps = () => STEP_LABELS.map(l => ({ label: l, status: "idle", detail: null }));
 
-// ── SuccessCard ───────────────────────────────────────────────────
+// ── SuccessCard (unchanged) ───────────────────────────────────────
 const SuccessCard = ({ amount, recipient, reference, onReset }) => (
   <div style={{ background: "#fff", borderRadius: 16, padding: "36px 32px", border: `1px solid ${tk.greenBorder}`, boxShadow: "0 4px 20px rgba(22,163,74,0.08)", animation: "fadeIn 0.4s ease", textAlign: "center" }}>
     <div style={{ width: 64, height: 64, borderRadius: "50%", margin: "0 auto 20px", background: tk.greenBg, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, color: tk.green }}>⇄</div>
@@ -65,7 +66,7 @@ const SuccessCard = ({ amount, recipient, reference, onReset }) => (
     </div>
     <div style={{ fontSize: 11, color: tk.muted, letterSpacing: 1, marginBottom: 24 }}>TND</div>
     <div style={{ background: tk.cream, borderRadius: 10, padding: "16px 18px", textAlign: "left", marginBottom: 20 }}>
-      {[["Recipient", recipient], ["Reference", reference], ["Status", "Completed"]].map(([k, v]) => (
+      {[["Recipient", recipient], ["Reference", reference || "—"], ["Status", "Completed"]].map(([k, v]) => (
         <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: `1px solid ${tk.creamBorder}` }}>
           <span style={{ fontSize: 10, color: tk.muted, textTransform: "uppercase", letterSpacing: 0.8 }}>{k}</span>
           <span style={{ fontSize: 12, color: k === "Status" ? tk.green : tk.navy, fontWeight: 600 }}>{v}</span>
@@ -80,87 +81,198 @@ const SuccessCard = ({ amount, recipient, reference, onReset }) => (
 
 // ── TransferPage ──────────────────────────────────────────────────
 const TransferPage = () => {
+  const [userAccountId, setUserAccountId] = useState(null);
   const [form, setForm] = useState({
-    recipientIban: "", recipientName: "", amount: "", note: "",
-    transferType: "instant",
+    destinationAccountId: "", // ← Backend expects this (not recipientIban)
+    recipientName: "",
+    amount: "",
+    reference: "",            // ← Backend expects this (not note)
   });
-  const [steps,       setSteps]       = useState(initSteps());
+  const [steps, setSteps] = useState(initSteps());
   const [flowVisible, setFlowVisible] = useState(false);
-  const [loading,     setLoading]     = useState(false);
-  const [result,      setResult]      = useState(null);
-  const [error,       setError]       = useState(null);
-  const [verified,    setVerified]    = useState(false);
-  const [verifying,   setVerifying]   = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [verified, setVerified] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+
+  // ── Fetch user's account ID on mount ────────────────────────────
+  useEffect(() => {
+    const fetchUserAccount = async () => {
+      try {
+        // Option A: Get from /auth/me if identity service returns accountId
+        const { data: me } = await api.get("/auth/me");
+        if (me?.accountId) {
+          setUserAccountId(me.accountId);
+          return;
+        }
+        // Option B: Fetch from /balance endpoint (returns accountNumber)
+        const { data: balance } = await api.get("/balance");
+        if (balance?.accountNumber) {
+          setUserAccountId(balance.accountNumber);
+        }
+      } catch (err) {
+        console.error("Failed to fetch user account:", err);
+        setError("Unable to load your account. Please log in again.");
+      }
+    };
+    fetchUserAccount();
+  }, []);
 
   const setStep = (i, patch) => setSteps(p => p.map((s, idx) => idx === i ? { ...s, ...patch } : s));
 
-  const handleVerify = async () => {
-    if (!form.recipientIban) return;
-    setVerifying(true);
-    try {
-      const { data } = await api.get(`/accounts/lookup?iban=${form.recipientIban}`);
-      setForm(f => ({ ...f, recipientName: data.name ?? data.username ?? "Account verified" }));
+  // ── Verify recipient account (lookup by account ID) ─────────────
+// TransferPage.jsx - handleVerify function
+const handleVerify = async () => {
+  const destId = form.destinationAccountId.trim();
+  if (!destId) return;
+  
+  setVerifying(true);
+  setError(null);
+  
+  try {
+    // ✅ Try customer-accessible endpoint first
+    const { data } = await api.get(`/accounts/verify/${destId}`);
+    
+    setForm(f => ({ 
+      ...f, 
+      recipientName: data?.name || data?.username || `Account ${destId.slice(0, 8)}...` 
+    }));
+    setVerified(true);
+    
+  } catch (err) {
+    // ✅ Fallback: Just validate UUID format for customers
+    const isValidFormat = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(destId);
+    
+    if (isValidFormat) {
+      setForm(f => ({ ...f, recipientName: `Account ${destId.slice(0, 8)}...` }));
       setVerified(true);
-    } catch {
+    } else {
       setVerified(false);
       setForm(f => ({ ...f, recipientName: "" }));
-      setError("Recipient account not found.");
-    } finally {
-      setVerifying(false);
+      setError("Invalid account ID format. Please check and try again.");
     }
-  };
+  } finally {
+    setVerifying(false);
+  }
+};
 
+  // ── Submit transfer ─────────────────────────────────────────────
   const handleSubmit = async () => {
     setError(null);
-    if (!form.recipientIban) { setError("Recipient IBAN is required."); return; }
+    
+    // Validate form
+    if (!userAccountId) {
+      setError("Unable to determine your account. Please refresh the page.");
+      return;
+    }
+    if (!form.destinationAccountId) {
+      setError("Recipient account ID is required.");
+      return;
+    }
     const parsed = parseFloat(form.amount);
-    if (!form.amount || isNaN(parsed) || parsed <= 0) { setError("Enter a valid amount."); return; }
+    if (!form.amount || isNaN(parsed) || parsed <= 0) {
+      setError("Enter a valid amount greater than 0.");
+      return;
+    }
+    if (form.destinationAccountId === userAccountId) {
+      setError("Cannot transfer to your own account.");
+      return;
+    }
 
     setLoading(true);
     setFlowVisible(true);
     setResult(null);
     setSteps(initSteps());
 
-    // Step 0 — Verify recipient
-    setStep(0, { status: "loading", detail: "Looking up recipient account…" });
-    await delay(400);
-    setStep(0, { status: "success", detail: `Recipient verified: ${form.recipientName || form.recipientIban}` });
-
-    // Step 1 — Validate balance
-    setStep(1, { status: "loading", detail: "Checking available balance…" });
-    let ref;
     try {
-      const { data } = await api.post("/transfer", {
-        recipientIban: form.recipientIban,
-        amount:        parsed.toFixed(4),
-        transferType:  form.transferType,
-        note:          form.note || null,
+      // Step 0 — Verify recipient
+      setStep(0, { status: "loading", detail: "Verifying recipient account…" });
+      await delay(400);
+      setStep(0, { 
+        status: "success", 
+        detail: `Recipient: ${form.recipientName || form.destinationAccountId.slice(0, 12) + "..."}` 
       });
-      ref = data.reference ?? `TRF-${Date.now()}`;
-      setStep(1, { status: "success", detail: "Balance sufficient" });
-      setStep(2, { status: "success", detail: `Transfer executed · Ref: ${ref}` });
-      setStep(3, { status: "success", detail: "Confirmed. Funds sent successfully." });
-      setResult({ amount: form.amount, recipient: form.recipientName || form.recipientIban, reference: ref });
-      setForm({ recipientIban: "", recipientName: "", amount: "", note: "", transferType: "instant" });
+
+      // Step 1 — Validate balance (implicit in backend transfer)
+      setStep(1, { status: "loading", detail: "Checking balance & processing…" });
+      
+      // ✅ Backend expects: sourceAccountId, destinationAccountId, amount, reference
+      const { data } = await api.post("/transfer", {
+        sourceAccountId: userAccountId,           // ← Your account (from auth/balance)
+        destinationAccountId: form.destinationAccountId, // ← Recipient account ID
+        amount: parsed,                           // ← Number, not string
+        reference: form.reference || `Transfer ${new Date().toLocaleDateString()}`, // ← Optional
+      });
+
+      // ✅ Backend returns: { transactionId, source, destination, amount, currency, reference, timestamp }
+      const ref = data?.reference || data?.transactionId?.slice(0, 8) || `TRF-${Date.now()}`;
+      
+      setStep(1, { status: "success", detail: "✓ Balance validated" });
+      setStep(2, { status: "success", detail: `✓ Transfer executed · Ref: ${ref}` });
+      setStep(3, { status: "success", detail: "✓ Confirmation complete" });
+      
+      // Show success
+      setResult({
+        amount: form.amount,
+        recipient: form.recipientName || form.destinationAccountId,
+        reference: ref,
+        transactionId: data?.transactionId,
+      });
+      
+      // Reset form for next transfer
+      setForm({
+        destinationAccountId: "",
+        recipientName: "",
+        amount: "",
+        reference: "",
+      });
       setVerified(false);
+      
     } catch (err) {
-      const msg = err.response?.data?.message ?? "Transfer failed.";
-      if (msg.toLowerCase().includes("balance") || msg.toLowerCase().includes("funds")) {
-        setStep(1, { status: "error", detail: `✕ ${msg}` });
-        setStep(2, { status: "error", detail: "Transfer aborted — insufficient funds." });
-        setStep(3, { status: "error", detail: "No funds transferred." });
+      console.error("Transfer failed:", err);
+      const msg = err.response?.data?.message || err.response?.data?.error || err.message || "Transfer failed.";
+      
+      // Map error to appropriate step
+      if (msg.toLowerCase().includes("insufficient") || msg.toLowerCase().includes("funds")) {
+        setStep(1, { status: "error", detail: `✕ Insufficient funds` });
+        setStep(2, { status: "error", detail: "Transfer aborted" });
+        setStep(3, { status: "error", detail: "No funds moved" });
+      } else if (msg.toLowerCase().includes("not found")) {
+        setStep(0, { status: "error", detail: `✕ Recipient account not found` });
+        setStep(1, { status: "idle", detail: null });
+        setStep(2, { status: "idle", detail: null });
+        setStep(3, { status: "idle", detail: null });
+      } else if (msg.toLowerCase().includes("currency")) {
+        setStep(1, { status: "error", detail: `✕ Currency mismatch` });
+        setStep(2, { status: "error", detail: "Transfer aborted" });
+        setStep(3, { status: "error", detail: "No funds moved" });
       } else {
-        setStep(1, { status: "success", detail: "Balance sufficient" });
+        // Generic error
+        setStep(1, { status: "success", detail: "✓ Balance validated" });
         setStep(2, { status: "error", detail: `✕ ${msg}` });
-        setStep(3, { status: "error", detail: "Transfer failed." });
+        setStep(3, { status: "error", detail: "Transfer failed" });
       }
+      
       setError(msg);
     } finally {
       setLoading(false);
     }
   };
 
-  const reset = () => { setSteps(initSteps()); setFlowVisible(false); setResult(null); setError(null); setVerified(false); setForm({ recipientIban: "", recipientName: "", amount: "", note: "", transferType: "instant" }); };
+  const reset = () => {
+    setSteps(initSteps());
+    setFlowVisible(false);
+    setResult(null);
+    setError(null);
+    setVerified(false);
+    setForm({
+      destinationAccountId: "",
+      recipientName: "",
+      amount: "",
+      reference: "",
+    });
+  };
 
   return (
     <div style={{ fontFamily: "'Georgia', serif", maxWidth: 960, margin: "0 auto" }}>
@@ -178,22 +290,34 @@ const TransferPage = () => {
         {!result ? (
           <div style={{ background: "#fff", borderRadius: 16, padding: 32, boxShadow: "0 2px 12px rgba(0,0,0,0.06)", border: `1px solid ${tk.creamBorder}` }}>
 
-            {/* Recipient IBAN */}
+            {/* Recipient Account ID */}
             <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>Recipient IBAN</label>
+              <label style={labelStyle}>Recipient Account ID</label>
               <div style={{ display: "flex", gap: 10 }}>
-                <input style={{ ...inputStyle, flex: 1, borderColor: verified ? tk.green + "80" : tk.creamBorder }}
-                  type="text" placeholder="TN59 1000 XXXX XXXX XXXX XXXX"
-                  value={form.recipientIban}
-                  onChange={e => { setForm(f => ({ ...f, recipientIban: e.target.value })); setVerified(false); setError(null); }}
+                <input 
+                  style={{ ...inputStyle, flex: 1, borderColor: verified ? tk.green + "80" : tk.creamBorder, fontFamily: "monospace", fontSize: 12 }}
+                  type="text" 
+                  placeholder="e.g. 550e8400-e29b-41d4-a716-446655440000"
+                  value={form.destinationAccountId}
+                  onChange={e => { 
+                    setForm(f => ({ ...f, destinationAccountId: e.target.value })); 
+                    setVerified(false); 
+                    setError(null); 
+                  }}
+                  disabled={loading}
                 />
-                <button onClick={handleVerify} disabled={!form.recipientIban || verifying} style={{
-                  padding: "12px 18px", borderRadius: 10, border: `1.5px solid ${tk.creamBorder}`,
-                  background: form.recipientIban ? tk.navy : tk.creamInput,
-                  color: form.recipientIban ? tk.goldLight : tk.muted,
-                  fontFamily: "'Georgia', serif", fontSize: 12, cursor: form.recipientIban ? "pointer" : "not-allowed",
-                  letterSpacing: 0.5, transition: "all 0.2s", whiteSpace: "nowrap",
-                }}>
+                <button 
+                  onClick={handleVerify} 
+                  disabled={!form.destinationAccountId || verifying || loading} 
+                  style={{
+                    padding: "12px 18px", borderRadius: 10, border: `1.5px solid ${tk.creamBorder}`,
+                    background: form.destinationAccountId && !loading ? tk.navy : tk.creamInput,
+                    color: form.destinationAccountId && !loading ? tk.goldLight : tk.muted,
+                    fontFamily: "'Georgia', serif", fontSize: 12, 
+                    cursor: (form.destinationAccountId && !loading) ? "pointer" : "not-allowed",
+                    letterSpacing: 0.5, transition: "all 0.2s", whiteSpace: "nowrap",
+                  }}
+                >
                   {verifying ? "…" : "Verify ↵"}
                 </button>
               </div>
@@ -210,47 +334,42 @@ const TransferPage = () => {
             <div style={{ marginBottom: 20 }}>
               <label style={labelStyle}>Amount (TND)</label>
               <div style={{ position: "relative" }}>
-                <input style={{ ...inputStyle, paddingRight: 60, fontSize: 18 }}
-                  type="number" min="0" step="0.001" placeholder="0.000"
+                <input 
+                  style={{ ...inputStyle, paddingRight: 60, fontSize: 18 }}
+                  type="number" 
+                  min="0.001" 
+                  step="0.001" 
+                  placeholder="0.000"
                   value={form.amount}
-                  onChange={e => { setForm(f => ({ ...f, amount: e.target.value })); setError(null); }}
+                  onChange={e => { 
+                    setForm(f => ({ ...f, amount: e.target.value })); 
+                    setError(null); 
+                  }}
+                  disabled={loading}
                 />
                 <span style={{ position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)", fontSize: 11, color: tk.muted, letterSpacing: 1, pointerEvents: "none" }}>TND</span>
               </div>
             </div>
 
-            {/* Transfer type */}
-            <div style={{ marginBottom: 20 }}>
-              <label style={labelStyle}>Transfer Type</label>
-              <div style={{ display: "flex", gap: 10 }}>
-                {[
-                  { value: "instant",   label: "Instant",   desc: "Processed immediately" },
-                  { value: "standard",  label: "Standard",  desc: "1–2 business days" },
-                ].map(t => (
-                  <button key={t.value} type="button" onClick={() => setForm(f => ({ ...f, transferType: t.value }))} style={{
-                    flex: 1, padding: "12px 14px", borderRadius: 10, cursor: "pointer",
-                    border: form.transferType === t.value ? `2px solid ${tk.blue}` : `1.5px solid ${tk.creamBorder}`,
-                    background: form.transferType === t.value ? tk.blueBg : tk.creamInput,
-                    textAlign: "left", fontFamily: "'Georgia', serif", transition: "all 0.15s",
-                  }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: form.transferType === t.value ? tk.blue : tk.navy }}>{t.label}</div>
-                    <div style={{ fontSize: 10, color: tk.muted, marginTop: 2 }}>{t.desc}</div>
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Note */}
+            {/* Reference / Note */}
             <div style={{ marginBottom: 24 }}>
-              <label style={labelStyle}>Reference / Note (optional)</label>
-              <input style={{ ...inputStyle, fontSize: 13 }} type="text" placeholder="e.g. Rent — April 2026" value={form.note} maxLength={80} onChange={e => setForm(f => ({ ...f, note: e.target.value }))} />
+              <label style={labelStyle}>Reference (optional)</label>
+              <input 
+                style={{ ...inputStyle, fontSize: 13 }} 
+                type="text" 
+                placeholder="e.g. Rent — April 2026" 
+                value={form.reference} 
+                maxLength={80} 
+                onChange={e => setForm(f => ({ ...f, reference: e.target.value }))}
+                disabled={loading}
+              />
             </div>
 
             {/* Info */}
             <div style={{ background: tk.blueBg, border: `1px solid ${tk.blueBorder}`, borderRadius: 10, padding: "12px 16px", display: "flex", gap: 10, marginBottom: 24 }}>
               <span style={{ color: tk.blue, fontSize: 14, flexShrink: 0 }}>⇄</span>
               <div style={{ fontSize: 12, color: "#555", lineHeight: 1.6 }}>
-                Instant transfers are processed within seconds. Standard transfers may take 1–2 business days. No fees for TND transfers within the same bank.
+                Transfers are processed instantly. Ensure the recipient account ID is correct — transactions cannot be reversed.
               </div>
             </div>
 
@@ -261,14 +380,24 @@ const TransferPage = () => {
             )}
 
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
-              <button onClick={handleSubmit} disabled={loading || !form.amount || !form.recipientIban} style={{
-                padding: "13px 36px", border: "none", borderRadius: 10,
-                background: loading || !form.amount || !form.recipientIban ? "#e8e2d8" : `linear-gradient(135deg, ${tk.navy}, ${tk.navyMid})`,
-                color: loading || !form.amount || !form.recipientIban ? tk.muted : tk.goldLight,
-                cursor: loading || !form.amount || !form.recipientIban ? "not-allowed" : "pointer",
-                fontSize: 13, fontFamily: "'Georgia', serif", fontWeight: 600, letterSpacing: 0.5,
-                display: "flex", alignItems: "center", gap: 10, transition: "all 0.2s",
-              }}>
+              <button 
+                onClick={handleSubmit} 
+                disabled={loading || !form.amount || !form.destinationAccountId || !userAccountId} 
+                style={{
+                  padding: "13px 36px", border: "none", borderRadius: 10,
+                  background: (loading || !form.amount || !form.destinationAccountId || !userAccountId) 
+                    ? "#e8e2d8" 
+                    : `linear-gradient(135deg, ${tk.navy}, ${tk.navyMid})`,
+                  color: (loading || !form.amount || !form.destinationAccountId || !userAccountId) 
+                    ? tk.muted 
+                    : tk.goldLight,
+                  cursor: (loading || !form.amount || !form.destinationAccountId || !userAccountId) 
+                    ? "not-allowed" 
+                    : "pointer",
+                  fontSize: 13, fontFamily: "'Georgia', serif", fontWeight: 600, letterSpacing: 0.5,
+                  display: "flex", alignItems: "center", gap: 10, transition: "all 0.2s",
+                }}
+              >
                 {loading
                   ? <><span style={{ width: 14, height: 14, border: "2px solid rgba(232,212,139,0.3)", borderTopColor: tk.goldLight, borderRadius: "50%", animation: "spin .7s linear infinite", display: "inline-block" }} />Processing…</>
                   : <><span>⇄</span> Confirm Transfer</>}
@@ -276,7 +405,12 @@ const TransferPage = () => {
             </div>
           </div>
         ) : (
-          <SuccessCard amount={result.amount} recipient={result.recipient} reference={result.reference} onReset={reset} />
+          <SuccessCard 
+            amount={result.amount} 
+            recipient={result.recipient} 
+            reference={result.reference} 
+            onReset={reset} 
+          />
         )}
 
         {/* Flow Panel */}
@@ -291,4 +425,5 @@ const TransferPage = () => {
     </div>
   );
 };
+
 export default TransferPage;

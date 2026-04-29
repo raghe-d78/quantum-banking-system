@@ -14,7 +14,12 @@ CREATE TABLE IF NOT EXISTS users (
   email         VARCHAR(255) UNIQUE NOT NULL,
   name          VARCHAR(100) NOT NULL,
   password_hash TEXT         NOT NULL,
-  role          VARCHAR(20)  NOT NULL DEFAULT 'customer', -- 'admin' | 'employee' | 'customer'
+  role          VARCHAR(20)  NOT NULL DEFAULT 'customer'
+                  CHECK (role IN ('admin', 'employee', 'customer')),
+  status        VARCHAR(20)  NOT NULL DEFAULT 'active'
+                  CHECK (status IN ('active', 'suspended')),
+  phone         VARCHAR(30),
+  address       VARCHAR(255),
   created_at    TIMESTAMP    DEFAULT NOW()
 );
 
