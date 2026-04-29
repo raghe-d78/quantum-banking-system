@@ -26,13 +26,11 @@ const AdminDashboardComponent = () => {
     { key: "create-user",     icon: "✦",  label: "Create User",          group: "User Management" },
     { key: "consult-users",   icon: "◈",  label: "Consult Users",        group: "User Management" },
     { key: "profile",  icon: "◈", label: "My Profile",  group: "Account" },
-    { key: "consult-users", icon: "◈", label: "Consult Users", group: "User Management" },
 
     // Operations
     // Fraud (Admin)
     { key: "fraud-notif",     icon: "⚠",  label: "Fraud Notifications",  group: "Fraud" },
     { key: "fraud-tx",        icon: "◉",  label: "Fraud Transactions",   group: "Fraud" },
-    { key: "suspend-account", icon: "⊘",  label: "Suspend Account",      group: "Fraud" },
     // Reports (Admin only)
     { key: "report",          icon: "▦",  label: "Generate Report",      group: "Reports" },
     { key: "fraud-stats",     icon: "◐",  label: "Fraud Statistics",     group: "Reports" },

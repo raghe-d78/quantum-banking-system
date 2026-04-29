@@ -45,6 +45,7 @@ const SuccessModal = ({ amount, customerName, accountId, onClose }) => (
 
 const DepositPage = () => {
   const [accountId,    setAccountId]    = useState("");
+  const [resolvedAccountId, setResolvedAccountId] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [amount,       setAmount]       = useState("");
   const [note,         setNote]         = useState("");
@@ -53,19 +54,30 @@ const DepositPage = () => {
   const [error,        setError]        = useState(null);
   const [success,      setSuccess]      = useState(false);
 
+  const resolveAccount = async (lookupValue) => {
+    const { data } = await api.get(`/admin/accounts/${lookupValue}`);
+    const nextAccountId = data.accountId ?? data.id ?? lookupValue;
+
+    setResolvedAccountId(nextAccountId);
+    setCustomerName(data.name ?? data.username ?? "Customer found");
+
+    return nextAccountId;
+  };
+
   // Lookup customer by account ID or username
   const handleLookup = async () => {
     if (!accountId) return;
     try {
       setLookingUp(true);
       setCustomerName("");
+      setResolvedAccountId("");
       setError(null);
-      const { data } = await api.get(`/admin/accounts/${accountId}`);
-      setCustomerName(data.name ?? data.username ?? "Customer found");
+      await resolveAccount(accountId);
     } catch (err){
       console.error(err);
       setError("Account not found. Check the ID and try again.");
       setCustomerName("");
+      setResolvedAccountId("");
     } finally {
       setLookingUp(false);
     }
@@ -73,13 +85,28 @@ const DepositPage = () => {
 
   const handleSubmit = async () => {
     setError(null);
-    if (!accountId) { setError("Account ID is required."); return; }
+    let targetAccountId = resolvedAccountId || accountId;
+    if (!targetAccountId) { setError("Account ID is required."); return; }
+    if (!resolvedAccountId) {
+      try {
+        setLookingUp(true);
+        targetAccountId = await resolveAccount(accountId);
+      } catch (err) {
+        console.error(err);
+        setError("Account not found. Check the ID and try again.");
+        setCustomerName("");
+        setResolvedAccountId("");
+        return;
+      } finally {
+        setLookingUp(false);
+      }
+    }
     const parsed = parseFloat(amount);
     if (!amount || isNaN(parsed) || parsed <= 0) { setError("Enter a valid amount greater than 0."); return; }
     try {
       setLoading(true);
       await api.post("/admin/deposit", {
-        accountId,
+        accountId: targetAccountId,
         amount: parsed.toFixed(4),
         note:   note || null,
       });
@@ -93,7 +120,7 @@ const DepositPage = () => {
 
   const handleClose = () => {
     setSuccess(false);
-    setAccountId(""); setCustomerName(""); setAmount(""); setNote("");
+    setAccountId(""); setResolvedAccountId(""); setCustomerName(""); setAmount(""); setNote("");
   };
 
   return (
@@ -116,14 +143,14 @@ const DepositPage = () => {
 
         {/* Account ID lookup */}
         <div style={{ marginBottom:24 }}>
-          <label style={labelStyle}>Customer Account ID</label>
+          <label style={labelStyle}>Customer Account ID / Username</label>
           <div style={{ display:"flex", gap:10 }}>
             <input
               style={{ ...inputStyle, flex:1, borderColor: customerName ? tk.green+"80" : tk.creamBorder }}
               type="text"
               placeholder="Enter account UUID or username"
               value={accountId}
-              onChange={(e) => { setAccountId(e.target.value); setCustomerName(""); setError(null); }}
+              onChange={(e) => { setAccountId(e.target.value); setResolvedAccountId(""); setCustomerName(""); setError(null); }}
               onKeyDown={(e) => e.key === "Enter" && handleLookup()}
             />
             <button onClick={handleLookup} disabled={!accountId || lookingUp} style={{
@@ -197,13 +224,13 @@ const DepositPage = () => {
         )}
 
         {/* Submit */}
-        <button onClick={handleSubmit} disabled={loading || !amount || !accountId} style={{
+        <button onClick={handleSubmit} disabled={loading || !amount || !(resolvedAccountId || accountId)} style={{
           width:"100%", padding:"15px",
-          background: loading || !amount || !accountId ? "#e8e2d8" : `linear-gradient(135deg, ${tk.navy}, ${tk.navyMid})`,
-          color: loading || !amount || !accountId ? tk.muted : tk.goldLight,
+          background: loading || !amount || !(resolvedAccountId || accountId) ? "#e8e2d8" : `linear-gradient(135deg, ${tk.navy}, ${tk.navyMid})`,
+          color: loading || !amount || !(resolvedAccountId || accountId) ? tk.muted : tk.goldLight,
           border:"none", borderRadius:12, fontSize:14, fontFamily:"'Georgia', serif",
           fontWeight:600, letterSpacing:0.5,
-          cursor: loading || !amount || !accountId ? "not-allowed" : "pointer",
+          cursor: loading || !amount || !(resolvedAccountId || accountId) ? "not-allowed" : "pointer",
           transition:"all 0.2s", display:"flex", alignItems:"center", justifyContent:"center", gap:10,
         }}>
           {loading ? (

@@ -61,6 +61,21 @@ app.post("/admin/users", (req, res) =>
     axios.post(`${IDENTITY_SERVICE_URL}/admin/users`, req.body, { headers: authHeader(req) })
   )
 );
+app.get("/admin/users", (req, res) =>
+  proxy(res, () =>
+    axios.get(`${IDENTITY_SERVICE_URL}/admin/users`, {
+      headers: authHeader(req),
+      params: req.query,
+    })
+  )
+);
+app.delete("/admin/users/:id", (req, res) =>
+  proxy(res, () =>
+    axios.delete(`${IDENTITY_SERVICE_URL}/admin/users/${req.params.id}`, {
+      headers: authHeader(req),
+    })
+  )
+);
 
 // ── ACCOUNT → account-service ─────────────────────────────────────
 app.get("/balance", (req, res) =>
@@ -92,13 +107,47 @@ app.get("/admin/accounts/:accountId", (req, res) =>
     axios.get(`${ACCOUNT_SERVICE_URL}/admin/accounts/${req.params.accountId}`, { headers: authHeader(req) })
   )
 );
+app.put("/auth/me", (req, res) =>
+  proxy(res, () =>
+    axios.put(
+      `${IDENTITY_SERVICE_URL}/auth/me`,
+      req.body,
+      { headers: authHeader(req) }
+    )
+  )
+);
+// GET user by id
+app.get("/admin/users/:id", (req, res) =>
+  proxy(res, () =>
+    axios.get(`${IDENTITY_SERVICE_URL}/admin/users/${req.params.id}`, {
+      headers: authHeader(req),
+    })
+  )
+);
 
+// UPDATE user
+app.put("/admin/users/:id", (req, res) =>
+  proxy(res, () =>
+    axios.put(
+      `${IDENTITY_SERVICE_URL}/admin/users/${req.params.id}`,
+      req.body,
+      { headers: authHeader(req) }
+    )
+  )
+);
 app.post("/admin/deposit", (req, res) =>
   proxy(res, () =>
     axios.post(`${ACCOUNT_SERVICE_URL}/deposit`, req.body, { headers: authHeader(req) })
   )
 );
-
+app.post("/transfer", (req, res) =>
+  proxy(res, () =>
+    axios.post(`${ACCOUNT_SERVICE_URL}/transfer`, req.body, {
+      headers: authHeader(req),
+      timeout: 15000, // 15s timeout for transfer operations
+    })
+  )
+);
 // ── Health ────────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "gateway running" }));
 
