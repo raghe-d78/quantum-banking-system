@@ -140,6 +140,14 @@ app.post("/admin/deposit", (req, res) =>
     axios.post(`${ACCOUNT_SERVICE_URL}/deposit`, req.body, { headers: authHeader(req) })
   )
 );
+app.post("/withdraw", (req, res) =>
+  proxy(res, () =>
+    axios.post(`${ACCOUNT_SERVICE_URL}/withdraw`, req.body, {
+      headers: authHeader(req),
+      timeout: 15000,
+    })
+  )
+);
 app.post("/transfer", (req, res) =>
   proxy(res, () =>
     axios.post(`${ACCOUNT_SERVICE_URL}/transfer`, req.body, {
@@ -148,6 +156,7 @@ app.post("/transfer", (req, res) =>
     })
   )
 );
+
 // ── Health ────────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "gateway running" }));
 

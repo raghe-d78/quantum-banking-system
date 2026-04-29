@@ -20,6 +20,13 @@ const findByUserId = async (userId) => {
   )
   return result.rows[0]
 }
+const getAccountByCustomerId = async (client, customerId) => {
+  const result = await client.query(
+    "SELECT * FROM accounts WHERE user_id = $1",
+    [customerId]
+  )
+  return result.rows[0]
+}
 
 const findById = async (id) => {
   const result = await pool.query(
@@ -52,4 +59,5 @@ module.exports = {
   create,
   findByUserId,
   findById,
+  getAccountByCustomerId,
 }

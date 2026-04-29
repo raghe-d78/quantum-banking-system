@@ -281,3 +281,94 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
   
   throw lastError || new Error("Transfer failed after all retries");
 };
+// services/account-service/src/account.service.js
+
+exports.withdraw = async (accountId, amount, note) => {
+  // ── Validation ───────────────────────────────────────────────────
+  if (!amount || amount <= 0) {
+    throw new Error("Invalid amount");
+  }
+  if (!accountId) {
+    throw new Error("Account ID is required");
+  }
+
+  const accountClient = await accountRepo.pool.connect();
+  const ledgerClient = await ledgerRepo.pool.connect();
+
+  try {
+    // ── Start distributed transaction ─────────────────────────────
+    await accountClient.query("BEGIN");
+    await ledgerClient.query("BEGIN");
+
+    // 🔒 Lock account row for update (prevents race conditions)
+    const account = await accountRepo.getAccountByCustomerId(
+      accountClient,
+      accountId
+    );
+
+    if (!account) {
+      throw new Error("Account not found");
+    }
+
+    // 🔐 Check sufficient funds
+    const current = Number(account.cached_balance);
+    if (current < amount) {
+      throw new Error(`Insufficient funds: ${current} < ${amount}`);
+    }
+
+    // 💰 Calculate new balance
+    const newBalance = current - Number(amount);
+    const transactionId = uuidv4();
+    const timestamp = new Date().toISOString();
+
+    // 📜 Insert DEBIT ledger entry
+    // ✅ Match ledger_entries schema: id, transaction_id, account_id, type, amount, balance_snapshot, reference, created_at
+    await ledgerRepo.insertEntry(ledgerClient, {
+      id: uuidv4(),                    // ✅ Unique ledger entry ID
+      transactionId,                   // ✅ Links to logical transaction
+      accountId: account.id,           // ✅ Account this entry belongs to
+      type: "DEBIT",                   // ✅ Withdrawal = debit from account
+      amount: Number(amount),          // ✅ Ensure number type
+      balance_snapshot: newBalance,    // ✅ CRITICAL: Must match schema column name
+      reference: note || `Withdrawal ${new Date().toLocaleDateString()}`, // ✅ 'note' → 'reference'
+      created_at: timestamp,           // ✅ Explicit timestamp
+    });
+
+    // 💰 Update account balance
+    await accountRepo.updateBalance(
+      accountClient,
+      account.id,
+      newBalance
+    );
+
+    // ✅ Commit both sides of distributed transaction
+    await accountClient.query("COMMIT");
+    await ledgerClient.query("COMMIT");
+
+    // 🎉 Return result
+    return {
+      transactionId,
+      accountId: account.id,
+      previousBalance: current,
+      newBalance,
+      amount: Number(amount),
+      currency: account.currency,
+      reference: note,
+      timestamp,
+    };
+
+  } catch (err) {
+    console.error("❌ Withdraw transaction failed:", err.message);
+
+    // 🔄 Rollback both connections on error
+    try { await accountClient.query("ROLLBACK"); } catch (_) {}
+    try { await ledgerClient.query("ROLLBACK"); } catch (_) {}
+
+    throw err; // Re-throw for upstream handling
+
+  } finally {
+    // ♻️ Always release connections back to pool
+    accountClient.release();
+    ledgerClient.release();
+  }
+};
