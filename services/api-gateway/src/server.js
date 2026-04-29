@@ -158,6 +158,15 @@ app.post("/customer/withdraw", (req, res) =>
 
 
 
+
+app.post("/customer/withdraw", (req, res) =>
+  proxy(res, () =>
+    axios.post(`${ACCOUNT_SERVICE_URL}/customer/withdraw`, req.body, { headers: authHeader(req) })
+  )
+);
+
+
+
 // ── Health ────────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "gateway running" }));
 

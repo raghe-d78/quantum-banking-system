@@ -84,6 +84,20 @@ router.post("/deposit", authenticate, requireStaff, async (req, res) => {
   }
 })
 
+// POST /withdraw
+router.post("/customer/withdraw", authenticate, async (req, res) => {
+  try {
+    const { amount, note } = req.body
+    const result = await accountService.withdraw(req.user.userId, amount, note)
+    res.json(result)
+  } catch (err) {
+    console.error("Error in /withdraw:", err)
+    res.status(400).json({
+      message: err.message
+    })
+  }
+})
+
 // verify account's existence (used by staff frontend)
 router.get("/admin/accounts/:accountId", authenticate, requireStaff, async (req, res) => {
   try {
