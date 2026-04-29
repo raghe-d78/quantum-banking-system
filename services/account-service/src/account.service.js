@@ -281,3 +281,56 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
   
   throw lastError || new Error("Transfer failed after all retries");
 };
+
+exports.withdraw = async (accountId, amount, note) => {
+  if (!amount || amount <= 0) {
+    throw new Error("Invalid amount")
+  }
+  const accountClient = await accountRepo.pool.connect()
+  const ledgerClient = await ledgerRepo.pool.connect()
+  try {
+    await accountClient.query("BEGIN")
+    await ledgerClient.query("BEGIN")
+    // 🔒 Lock account row
+    const account = await accountRepo.getAccountByCustomerId(
+      accountClient,
+      accountId
+    )
+    if (!account) throw new Error("Account not found")
+    const current = Number(account.cached_balance)
+    if (current < amount) {
+      throw new Error("Insufficient funds")
+    }
+    const newBalance = current - Number(amount)
+    const transactionId = uuidv4()
+    // 📜 Ledger entry
+    await ledgerRepo.insertEntry(ledgerClient, {
+      transactionId,
+      accountId: account.id,
+      type: "DEBIT",
+      amount,
+      balance: newBalance,
+      note
+    })
+    // 💰 Update balance
+    await accountRepo.updateBalance(
+      accountClient,
+      account.id,
+      newBalance
+    )
+    await accountClient.query("COMMIT")
+    await ledgerClient.query("COMMIT")
+    return {
+      transactionId,
+      balance: newBalance
+    }
+  } catch (err) {
+    console.error("Error in withdraw transaction:", err) 
+    await accountClient.query("ROLLBACK")
+    await ledgerClient.query("ROLLBACK")
+    throw err
+  } finally {
+    accountClient.release()
+    ledgerClient.release()
+  }
+};

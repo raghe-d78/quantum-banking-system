@@ -45,6 +45,14 @@ const updateBalance = async (client, accountId, newBalance) => {
   )
 }
 
+const getAccountByCustomerId = async (client, customerId) => {
+  const result = await client.query(
+    "SELECT * FROM accounts WHERE user_id = $1",
+    [customerId]
+  )
+  return result.rows[0]
+}
+
 module.exports = {
   pool,
   getAccountForUpdate,
@@ -52,4 +60,5 @@ module.exports = {
   create,
   findByUserId,
   findById,
+  getAccountByCustomerId,
 }

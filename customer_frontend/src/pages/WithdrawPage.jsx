@@ -56,7 +56,7 @@ const WithdrawPage = () => {
     }
     try {
       setLoading(true);
-      await api.post("/withdraw", {
+      await api.post("/customer/withdraw", {
         amount: parsed.toFixed(4),
         note:   note || null,
       });
