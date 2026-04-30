@@ -1,0 +1,87 @@
+name: Quantum CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+    paths:
+      - "services/quantum-service/**"
+      - "services/qkd-kms/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "services/quantum-service/**"
+      - "services/qkd-kms/**"
+
+jobs:
+  test-quantum-service:
+    name: quantum-service tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: services/quantum-service/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          cd services/quantum-service
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Run pytest
+        run: |
+          cd services/quantum-service
+          pytest -q tests/
+
+  test-qkd-kms:
+    name: qkd-kms tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: services/qkd-kms/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          cd services/qkd-kms
+          pip install --no-cache-dir -r requirements.txt
+
+      - name: Run pytest
+        run: |
+          cd services/qkd-kms
+          pytest -q tests/
+
+  docker-build-quantum:
+    name: Docker build quantum services
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    needs: [test-quantum-service, test-qkd-kms]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build quantum-service image
+        run: |
+          docker build -t quantum-service:ci services/quantum-service
+
+      - name: Build qkd-kms image
+        run: |
+          docker build -t qkd-kms:ci services/qkd-kms
