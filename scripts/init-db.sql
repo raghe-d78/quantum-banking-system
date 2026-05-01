@@ -59,4 +59,17 @@ CREATE TABLE IF NOT EXISTS ledger_entries (
 -- Index for fast lookup by account + chronological order
 CREATE INDEX IF NOT EXISTS idx_ledger_account_created
   ON ledger_entries (account_id, created_at ASC);
- 
+
+-- ── Refresh tokens (Phase 0.1) ────────────────────────────────────
+USE identity_db;
+
+CREATE TABLE IF NOT EXISTS refresh_tokens (
+  token_hash   TEXT       PRIMARY KEY,
+  user_id      UUID       NOT NULL,
+  expires_at   TIMESTAMP  NOT NULL,
+  created_at   TIMESTAMP  NOT NULL DEFAULT NOW(),
+  revoked_at   TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user
+  ON refresh_tokens (user_id);

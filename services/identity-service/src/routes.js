@@ -5,6 +5,16 @@ const authService = require("./auth.service");
 const userService = require("./user.service");
 const { authenticate, requireAdmin, requireStaff } = require("./middleware/auth.middleware");
 
+// Legacy unified login — kept for backwards compatibility (no role gate).
+// New clients should use /auth/staff/login or /auth/customer/login.
+router.post("/auth/login", async (req, res) => {
+  try {
+    res.json(await authService.login(req.body))
+  } catch (err) {
+    res.status(401).json({ message: err.message })
+  }
+})
+
 router.post("/auth/staff/login", async (req, res) => {
   try {
     const result = await authService.login(req.body)
@@ -30,6 +40,26 @@ router.post("/auth/customer/login", async (req, res) => {
   } catch (err) {
     console.error("Error in /auth/login:", err)
     res.status(401).json({ message: err.message })
+  }
+})
+
+// REFRESH — exchange refresh token for a new access+refresh pair
+router.post("/auth/refresh", async (req, res) => {
+  try {
+    const result = await authService.refresh(req.body.refreshToken)
+    res.json(result)
+  } catch (err) {
+    res.status(401).json({ message: err.message })
+  }
+})
+
+// LOGOUT — revoke the supplied refresh token (idempotent)
+router.post("/auth/logout", async (req, res) => {
+  try {
+    await authService.logout(req.body.refreshToken)
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ message: err.message })
   }
 })
 

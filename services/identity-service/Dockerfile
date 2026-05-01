@@ -7,5 +7,6 @@ RUN npm install
 
 COPY services/identity-service ./
 COPY shared ../shared
+RUN cd ../shared && npm install --omit=dev
 
 CMD ["node","src/server.js"]
