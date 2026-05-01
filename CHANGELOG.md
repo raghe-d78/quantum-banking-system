@@ -8,7 +8,70 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — Phase 2: Redis read cache + distributed rate limiter
+## [Unreleased] — Phase 3: Quantum compute + Key Management Service
+
+### Added
+- **`services/quantum-service/`** — Python 3.11 + Flask + Qiskit 1.2 service
+  on port **3005**. Backend selectable via `QUANTUM_BACKEND` env
+  (`simulator` default → `qiskit_aer.AerSimulator`; `ibm` opt-in →
+  `qiskit-ibm-runtime`, requires `IBM_QUANTUM_TOKEN` + `IBM_QUANTUM_CRN`
+  in gitignored `.env`). Gunicorn 2 workers / 2 threads / 60s timeout.
+- **FR-13 — QRNG** (`GET /qrng?bytes=N`): 16-qubit Hadamard chunks measured in
+  batched shots, refilled lazily into a 4 KiB `bytearray` buffer guarded by a
+  `threading.Lock`. Returns hex + base64 + `source` (`quantum`|`fallback`).
+  Falls back to `secrets.token_bytes()` on simulator failure.
+- **FR-14 — BB84 QKD** (`POST /qkd/bb84`): Alice prepares qubits in random
+  bits/bases; optional Eve performs intercept-resend; Bob measures in random
+  bases. Sifting keeps matching bases (~50%); 25% sample estimates QBER;
+  rounds with QBER > 0.11 are rejected (HTTP 422). Multi-round majority vote
+  produces the final shared key. Verified: no-Eve gives QBER=0; with-Eve
+  spikes QBER to ~0.25–0.40 and aborts every round.
+- **FR-15 — Circuit visualization** (`GET /qkd/visualize?n_qubits=N`):
+  matplotlib (Agg backend) PNG of a BB84-style circuit. Server-side
+  `n_qubits` clamp to **16** (resource guard).
+- **`services/kms-service/`** — Node 20 service on port **3006** wrapping
+  quantum-service to mint **AES-256-GCM session keys**:
+  - `POST /kms/keys` → calls BB84 with `KEY_QUBITS=1024, KEY_ROUNDS=3`,
+    extracts the first 256 bits of the majority-voted key, stores in Redis
+    under `kms:key:{kid}` with `KEY_TTL_SEC=300` TTL. Returns only the
+    `kid` + provenance metadata (rounds_accepted, qber_mean).
+  - `GET /kms/keys/{kid}` → **write-once / read-once**: returns the
+    base64 key bytes AND immediately deletes the entry. Subsequent calls
+    return HTTP 410 Gone, defeating replays at the KMS layer.
+- **API Gateway proxy routes**:
+  - `GET /quantum/backend`, `GET /quantum/qrng`, `POST /quantum/qkd/bb84`
+  - `GET /quantum/qkd/visualize` (PNG passthrough — `arraybuffer` axios
+    response, `image/png` content-type forwarded)
+  - `POST /kms/keys`, `GET /kms/keys/:kid`
+- **`infrastructure/.env.example`** — committed template for
+  `QUANTUM_BACKEND`, `QRNG_BUFFER_BYTES`, `IBM_QUANTUM_TOKEN`,
+  `IBM_QUANTUM_CRN`. Real `.env` remains gitignored.
+- **docker-compose**: `quantum-service` (no DB deps, stateless) and
+  `kms-service` (depends on redis healthy + quantum-service started)
+  blocks added.
+
+### Notes
+- IBM Quantum is wired as an opt-in toggle but **never called by default**
+  (deliberate — avoids consuming the user's free quota during dev).
+- BB84 majority-vote across rounds gives an extra noise margin even when
+  QBER > 0; with the simulator (noiseless) it's effectively a key-length
+  consistency check.
+- Quantum-service is **not** rate-limited at the gateway because all
+  callers are internal and the auth limiter only covers `/auth/*`. If
+  exposed externally in the future, add a dedicated limiter prefix.
+
+### Verified
+- `GET /qrng?bytes=32` → 32 quantum bytes, source=quantum, buffer 8160B remaining
+- `POST /qkd/bb84` (no Eve) → QBER=0.0, accepted=true, 48-bit key (n_qubits=128)
+- `POST /qkd/bb84` (with Eve) → QBER 0.29–0.40, accepted=false, HTTP 422
+- `GET /qkd/visualize?n_qubits=4&with_eve=true` → 30 KB PNG, HTTP 200
+- KMS mint → 256-bit key, kid returned, key NOT in response
+- KMS read 1 → key bytes returned, HTTP 200
+- KMS read 2 (replay) → HTTP 410, "key missing or already consumed"
+- Phase 2 regression (`scripts/loadtest/phase2-check.ps1`) → still green:
+  cold MISS → warm HIT → deposit invalidation → 42 TND read-through.
+
+
 
 ### Added
 - **Redis** (`redis:7-alpine`) added to `infrastructure/docker-compose.yml`

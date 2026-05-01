@@ -72,6 +72,8 @@ app.use(
 // ── Service URLs ──────────────────────────────────────────────────
 const IDENTITY_SERVICE_URL = process.env.IDENTITY_SERVICE_URL || "http://identity-service:3001";
 const ACCOUNT_SERVICE_URL  = process.env.ACCOUNT_SERVICE_URL  || "http://account-service:3002";
+const QUANTUM_SERVICE_URL  = process.env.QUANTUM_SERVICE_URL  || "http://quantum-service:3005";
+const KMS_SERVICE_URL      = process.env.KMS_SERVICE_URL      || "http://kms-service:3006";
 
 // ── Proxy helper ──────────────────────────────────────────────────
 const proxy = async (res, fn) => {
@@ -216,6 +218,40 @@ app.post("/transfer", (req, res) =>
       timeout: 15000, // 15s timeout for transfer operations
     })
   )
+);
+
+// ── QUANTUM → quantum-service (Phase 3) ───────────────────────────
+app.get("/quantum/backend", (req, res) =>
+  proxy(res, () => axios.get(`${QUANTUM_SERVICE_URL}/backend`))
+);
+app.get("/quantum/qrng", (req, res) =>
+  proxy(res, () => axios.get(`${QUANTUM_SERVICE_URL}/qrng`, { params: req.query }))
+);
+app.post("/quantum/qkd/bb84", (req, res) =>
+  proxy(res, () => axios.post(`${QUANTUM_SERVICE_URL}/qkd/bb84`, req.body, { timeout: 60000 }))
+);
+// PNG passthrough — proxy() expects JSON, so handle separately.
+app.get("/quantum/qkd/visualize", async (req, res) => {
+  try {
+    const r = await axios.get(`${QUANTUM_SERVICE_URL}/qkd/visualize`, {
+      params: req.query, responseType: "arraybuffer", timeout: 30000,
+    });
+    res.set("Content-Type", "image/png").status(r.status).send(Buffer.from(r.data));
+  } catch (err) {
+    res.status(err.response?.status || 500).json({ message: err.message });
+  }
+});
+
+// ── KMS → kms-service (Phase 3.4) ─────────────────────────────────
+app.post("/kms/keys", (req, res) =>
+  proxy(res, () => axios.post(`${KMS_SERVICE_URL}/kms/keys`, req.body, {
+    headers: authHeader(req), timeout: 60000,
+  }))
+);
+app.get("/kms/keys/:kid", (req, res) =>
+  proxy(res, () => axios.get(`${KMS_SERVICE_URL}/kms/keys/${req.params.kid}`, {
+    headers: authHeader(req),
+  }))
 );
 
 // ── Health ────────────────────────────────────────────────────────

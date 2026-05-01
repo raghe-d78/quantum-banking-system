@@ -162,8 +162,47 @@ services:
       - CORS_ORIGIN=http://localhost:5173,http://localhost:5174
       - IDENTITY_SERVICE_URL=http://identity-service:3001
       - ACCOUNT_SERVICE_URL=http://account-service:3002
+      - QUANTUM_SERVICE_URL=http://quantum-service:3005
+      - KMS_SERVICE_URL=http://kms-service:3006
       - REDIS_URL=redis://redis:6379
     depends_on:
       - identity-service
       - account-service
       - redis
+
+  # ── Phase 3 — Quantum compute (QRNG + BB84 + circuit viz) ───────
+  # Python/Qiskit service. Defaults to local Aer simulator (free, instant).
+  # IBM Quantum hardware can be enabled by setting QUANTUM_BACKEND=ibm
+  # AND providing IBM_QUANTUM_TOKEN + IBM_QUANTUM_CRN via .env (gitignored).
+  quantum-service:
+    build:
+      context: ..
+      dockerfile: services/quantum-service/Dockerfile
+    ports:
+      - "3005:3005"
+    environment:
+      - PORT=3005
+      - QUANTUM_BACKEND=${QUANTUM_BACKEND:-simulator}
+      - QRNG_BUFFER_BYTES=${QRNG_BUFFER_BYTES:-4096}
+      - IBM_QUANTUM_TOKEN=${IBM_QUANTUM_TOKEN:-}
+      - IBM_QUANTUM_CRN=${IBM_QUANTUM_CRN:-}
+
+  # ── Phase 3.4 — Key Management Service (BB84-derived AES-256-GCM) ─
+  kms-service:
+    build:
+      context: ..
+      dockerfile: services/kms-service/Dockerfile
+    ports:
+      - "3006:3006"
+    environment:
+      - PORT=3006
+      - QUANTUM_SERVICE_URL=http://quantum-service:3005
+      - REDIS_URL=redis://redis:6379
+      - KEY_TTL_SEC=300
+      - KEY_ROUNDS=3
+      - KEY_QUBITS=1024
+    depends_on:
+      redis:
+        condition: service_healthy
+      quantum-service:
+        condition: service_started

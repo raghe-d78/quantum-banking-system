@@ -1,0 +1,8 @@
+flask==3.0.3
+gunicorn==22.0.0
+qiskit==1.2.4
+qiskit-aer==0.15.1
+qiskit-ibm-runtime==0.30.0
+matplotlib==3.9.2
+numpy==1.26.4
+pylatexenc==2.10
