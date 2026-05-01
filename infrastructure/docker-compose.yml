@@ -24,7 +24,9 @@ services:
     environment:
       - PORT=3001
       - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
+      - JWT_REFRESH_SECRET=banque_refresh_secret_2026
       - JWT_EXPIRES=24h
+      - JWT_REFRESH_EXPIRES=7d
       - DB_HOST=cockroachdb
       - DB_PORT=26257
       - DB_NAME=identity_db
@@ -45,6 +47,7 @@ services:
       - DB_HOST=cockroachdb
       - DB_PORT=26257
       - DB_NAME=account_db
+      - DAILY_TRANSFER_LIMIT_TND=10000
     depends_on:
       cockroachdb:
         condition: service_healthy
