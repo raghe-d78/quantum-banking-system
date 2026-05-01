@@ -13,6 +13,7 @@
     "dotenv": "^16.0.0",
     "express": "^4.19.0",
     "jsonwebtoken": "^9.0.0",
+    "kafkajs": "^2.2.4",
     "test": "^3.3.0",
     "uuid": "^14.0.0"
   },

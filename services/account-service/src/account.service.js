@@ -1,8 +1,11 @@
 // services/account-service/src/account.service.js
 const accountRepo = require("./account.repository")
 const ledgerRepo = require("./repositories/ledger.repository")
+const outboxRepo = require("./repositories/outbox.repository")
 const { randomUUID: uuidv4 } = require("crypto")
 const Money = require("/shared/money")
+
+const TX_TOPIC = process.env.TX_EVENTS_TOPIC || "transaction.events"
 
 // Phase 0.3 — daily transfer cap (rolling 24h window of DEBITs from source).
 // Tunable per environment via DAILY_TRANSFER_LIMIT_TND (default 10 000 TND).
@@ -87,6 +90,20 @@ exports.deposit = async (accountId, amount) => {
       accountId,
       newBalanceStr
     )
+
+    // 📤 Phase 1.2 — Outbox: enqueue Kafka event in the SAME ledger txn.
+    await outboxRepo.enqueue(ledgerClient, {
+      transactionId,
+      topic: TX_TOPIC,
+      partitionKey: accountId,
+      payload: {
+        transactionId, type: "DEPOSIT", accountId,
+        amount: Number(depositMoney.toFixed(4)), currency,
+        balanceSnapshot: newBalanceNum,
+        reference: `Deposit ${new Date().toLocaleDateString()}`,
+        timestamp,
+      },
+    })
 
     await accountClient.query("COMMIT")
     await ledgerClient.query("COMMIT")
@@ -238,7 +255,31 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
         accountRepo.updateBalance(accountClient, sourceAccountId, newSourceMoney.toFixed(4)),
         accountRepo.updateBalance(accountClient, destinationAccountId, newDestMoney.toFixed(4)),
       ]);
-      
+
+      // 📤 Phase 1.2 — Outbox: one event per side, both in the ledger txn.
+      await outboxRepo.enqueue(ledgerClient, {
+        transactionId, topic: TX_TOPIC, partitionKey: sourceAccountId,
+        payload: {
+          transactionId, type: "TRANSFER_DEBIT",
+          accountId: sourceAccountId, counterpartyAccountId: destinationAccountId,
+          amount: Number(transferMoney.toFixed(4)), currency,
+          balanceSnapshot: newSourceBalance,
+          reference: debitEntry.reference, initiatedBy,
+          timestamp,
+        },
+      });
+      await outboxRepo.enqueue(ledgerClient, {
+        transactionId, topic: TX_TOPIC, partitionKey: destinationAccountId,
+        payload: {
+          transactionId, type: "TRANSFER_CREDIT",
+          accountId: destinationAccountId, counterpartyAccountId: sourceAccountId,
+          amount: Number(transferMoney.toFixed(4)), currency,
+          balanceSnapshot: newDestBalance,
+          reference: creditEntry.reference, initiatedBy,
+          timestamp,
+        },
+      });
+
       await accountClient.query("COMMIT");
       await ledgerClient.query("COMMIT");
       
@@ -350,6 +391,18 @@ exports.withdraw = async (accountId, amount, note) => {
       account.id,
       newMoney.toFixed(4)
     );
+
+    // 📤 Phase 1.2 — Outbox: enqueue withdrawal event.
+    await outboxRepo.enqueue(ledgerClient, {
+      transactionId, topic: TX_TOPIC, partitionKey: account.id,
+      payload: {
+        transactionId, type: "WITHDRAW", accountId: account.id,
+        amount: Number(withdrawMoney.toFixed(4)), currency,
+        balanceSnapshot: newBalance,
+        reference: note || `Withdrawal ${new Date().toLocaleDateString()}`,
+        timestamp,
+      },
+    });
 
     // ✅ Commit both sides of distributed transaction
     await accountClient.query("COMMIT");

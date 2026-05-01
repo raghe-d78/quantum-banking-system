@@ -4,6 +4,7 @@ CREATE DATABASE IF NOT EXISTS identity_db;
 CREATE DATABASE IF NOT EXISTS account_db;
 CREATE DATABASE IF NOT EXISTS ledger_db;
 CREATE DATABASE IF NOT EXISTS transaction_db;
+CREATE DATABASE IF NOT EXISTS audit_db;
 
 -- ── Identity DB ───────────────────────────────────────────────────
 USE identity_db;
@@ -73,3 +74,47 @@ CREATE TABLE IF NOT EXISTS refresh_tokens (
 
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user
   ON refresh_tokens (user_id);
+
+-- ── Event Outbox (Phase 1.2) ──────────────────────────────────────
+-- Sits in ledger_db so it can be inserted in the same transaction as
+-- the ledger entry. A relay loop in account-service publishes PENDING
+-- rows to Kafka and flips them to SENT.
+USE ledger_db;
+
+CREATE TABLE IF NOT EXISTS event_outbox (
+  id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+  transaction_id  UUID         NOT NULL,
+  topic           VARCHAR(100) NOT NULL,
+  partition_key   VARCHAR(100) NOT NULL,
+  payload         JSONB        NOT NULL,
+  status          VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+                    CHECK (status IN ('PENDING','SENT','FAILED')),
+  attempts        INT          NOT NULL DEFAULT 0,
+  last_error      TEXT,
+  created_at      TIMESTAMP    NOT NULL DEFAULT NOW(),
+  sent_at         TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_outbox_pending
+  ON event_outbox (status, created_at) WHERE status = 'PENDING';
+
+-- ── Audit Logs (Phase 1.3) ────────────────────────────────────────
+USE audit_db;
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+  transaction_id   UUID         PRIMARY KEY,
+  event_type       VARCHAR(50)  NOT NULL,
+  account_id       UUID         NOT NULL,
+  amount           DECIMAL(15,4) NOT NULL,
+  currency         VARCHAR(10)  NOT NULL,
+  balance_snapshot DECIMAL(15,4),
+  initiated_by     UUID,
+  reference        TEXT,
+  event_timestamp  TIMESTAMP    NOT NULL,
+  kafka_partition  INT,
+  kafka_offset     INT8,
+  recorded_at      TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_account_time
+  ON audit_logs (account_id, event_timestamp DESC);

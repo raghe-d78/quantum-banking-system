@@ -3,6 +3,84 @@
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+# Changelog
+
+All notable changes to the Quantum Banking System are documented in this file.
+Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
+
+## [Unreleased] — Phase 1: Kafka event backbone, transactional outbox, audit-service
+
+### Added
+- **Kafka broker** (`apache/kafka:3.7.0` in **KRaft mode**, no Zookeeper) wired into
+  `infrastructure/docker-compose.yml` as service `kafka`, plus a one-shot
+  `kafka-init` container that creates topics `transaction.events`
+  (3 partitions, 7-day retention) and `audit.logs` (1 partition, 30-day retention).
+- **Transactional outbox** in `ledger_db.event_outbox` (created in
+  `scripts/init-db.sql`): every deposit / withdraw / transfer enqueues its event
+  in the **same SQL transaction** as the ledger entries (`PENDING` row), so a
+  process crash can never leave the ledger inconsistent with downstream consumers.
+- New module `services/account-service/src/repositories/outbox.repository.js`
+  (enqueue / fetchPendingBatch / markSent / markFailed).
+- New module `services/account-service/src/kafka.js` — KafkaJS producer plus a
+  **relay loop** polling the outbox every `OUTBOX_POLL_MS` (default 500 ms) and
+  publishing pending events to `transaction.events`. Uses
+  `Partitioners.DefaultPartitioner` keyed by `accountId`, so per-account
+  ordering is preserved across partitions. Failures bump `attempts`; rows flip
+  to `FAILED` after 10 retries.
+- Brand-new **`audit-service`** (`services/audit-service/`):
+  - KafkaJS consumer in group `audit-workers`, `autoCommit: false`.
+  - Idempotent insert via `INSERT … ON CONFLICT (transaction_id) DO NOTHING`
+    into a new `audit_db.audit_logs` table, then **manual `commitOffsets`** —
+    effectively exactly-once.
+  - HTTP routes `GET /health`, `GET /audit/stats`, `GET /audit/recent` on
+    host port `:3004`.
+- New deps: `kafkajs@^2.2.4` in account-service and audit-service.
+- Load-test scripts under `scripts/loadtest/`:
+  - `concurrent-deposits.js` — Node fallback, fires N parallel deposits and
+    asserts `final_balance == initial + N` and `audit_logs.count == N`.
+  - `concurrent-deposits.k6.js` — k6 variant for higher throughput.
+- `Makefile` target `loadtest`.
+
+### Changed
+- `services/account-service/src/account.service.js` now enqueues outbox events
+  inside the existing ledger transaction:
+  - `deposit` → 1 × `DEPOSIT`
+  - `withdraw` → 1 × `WITHDRAWAL`
+  - `transfer` → 2 × event (`TRANSFER_DEBIT` + `TRANSFER_CREDIT`)
+- `services/account-service/src/server.js` connects the Kafka producer and
+  starts the outbox relay on boot (with retry/back-off), and shuts both down
+  cleanly on SIGTERM/SIGINT.
+- `scripts/init-db.sql` — adds `audit_db`, `audit_logs` (PK `transaction_id`,
+  with `kafka_partition`/`kafka_offset` columns) and `event_outbox`
+  (status `PENDING`/`SENT`/`FAILED`, `attempts` counter,
+  `idx_outbox_pending` partial index for fast relay polling).
+- `account-service` env wires `KAFKA_BROKERS=kafka:9092`,
+  `TX_EVENTS_TOPIC=transaction.events`, `OUTBOX_POLL_MS=500`,
+  and `depends_on: { kafka: { condition: service_healthy } }`.
+
+### Notes
+- Image-availability gotcha: `bitnami/kafka:3.6` and `bitnami/zookeeper:3.9`
+  did **not** pull from docker.io in this environment. We standardised on
+  `apache/kafka:3.7.0` in **KRaft** single-node mode (`KAFKA_PROCESS_ROLES=broker,controller`,
+  `KAFKA_CONTROLLER_QUORUM_VOTERS=1@kafka:9094`,
+  `CLUSTER_ID=MkU3OEVBNTcwNTJENDM2Qk`). Tools live at `/opt/kafka/bin/`.
+- `kafka-init` uses single-line `&&`-chained `kafka-topics.sh` invocations
+  (an earlier YAML literal block + bash line-continuations broke arg parsing
+  for the second topic).
+- `ON CONFLICT (transaction_id) DO NOTHING` + manual offset commit gives
+  exactly-once **effective** semantics: a redeliver after a consumer crash
+  is a no-op insert.
+- Future toggle: setting `OUTBOX_DISABLED=true` would skip relay startup
+  for environments without Kafka — wire the env when needed.
+
+### Tests
+- **Pipeline smoke**: 5 deposits → `event_outbox`: 5 SENT, `audit_logs`: 5,
+  `/audit/stats` reports `deposits=5`.
+- **Concurrent load test** (`node scripts/loadtest/concurrent-deposits.js 100`):
+  - 100/100 HTTP 200, throughput ≈ 41 req/s on the dev box.
+  - `accounts.cached_balance == 100`, `ledger_entries SUM(amount) == 100`,
+    `audit_logs.count == 100` for that account → **VERDICT: ✅ PASS**.
+
 ## [Unreleased] — Phase 0.5: OpenAPI / Swagger UI
 
 ### Added
