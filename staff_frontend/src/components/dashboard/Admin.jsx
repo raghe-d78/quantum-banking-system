@@ -6,6 +6,7 @@ import RegisterForm from "../../pages/RegisterForm";
 import DepositPage  from "../../pages/DepositPage";
 import UpdateProfilePage from "../../pages/UpdateProfilePage";
 import UsersPage from "../../pages/UsersPage";
+import FraudPage from "../../pages/FraudPage";
 const tk = {
   navy: "#0a1628", navyMid: "#1a3a6b", gold: "#c9a84c", goldLight: "#e8d48b",
   cream: "#f5f3ef", creamBorder: "#e8e2d8", muted: "#aaa",
@@ -129,7 +130,11 @@ const AdminDashboardComponent = () => {
               
               {activeMenu === "profile"     && <UpdateProfilePage />}
               {activeMenu === "consult-users" && <UsersPage />}
-              {activeMenu !== "create-user"  && activeMenu !== "profile" && activeMenu !== "consult-users" && (
+              {activeMenu === "fraud-notif"  && <FraudPage view="notifications" />}
+              {activeMenu === "fraud-tx"     && <FraudPage view="transactions" />}
+              {activeMenu === "fraud-stats"  && <FraudPage view="stats" />}
+              {activeMenu !== "create-user"  && activeMenu !== "profile" && activeMenu !== "consult-users"
+                && activeMenu !== "fraud-notif" && activeMenu !== "fraud-tx" && activeMenu !== "fraud-stats" && (
             <Placeholder icon={menuItems.find(i=>i.key===activeMenu)?.icon} label={menuItems.find(i=>i.key===activeMenu)?.label} />
           )}
         </main>

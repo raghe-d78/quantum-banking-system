@@ -5,6 +5,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — Phase 4: Quantum-ML Fraud Detection
 
+### Added (Phase 4.5 — Staff Fraud Dashboard)
+- `staff_frontend/src/pages/FraudPage.jsx` — single React component
+  that powers three Admin sidebar views:
+  - **Fraud Notifications** — open alerts feed, auto-refresh every 10 s,
+    color-coded by risk level.
+  - **Fraud Transactions** — full alert table with risk/status filters
+    and a one-click **Cancel** action that prompts for a reason and
+    posts to `POST /admin/transactions/:id/cancel` (writes
+    compensating ledger entries via the Phase 4 endpoint).
+  - **Fraud Statistics** — live KPIs (total scored, open alerts,
+    distribution by risk), Kafka consumer health, and side-by-side
+    metadata + metrics for the classical baseline and quantum VQC,
+    refreshed every 15 s.
+- Wired into `components/dashboard/Admin.jsx` (replacing the
+  three "Coming Soon" placeholders).
 ### Verified (this session)
 - `fraud-service` boots cleanly with `qiskit-machine-learning==0.8.2`
   (previous `0.7.2` pulled `qiskit-algorithms` which is incompatible with
