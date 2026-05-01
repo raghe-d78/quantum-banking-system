@@ -80,12 +80,12 @@ services:
       - "3001:3001"
     environment:
       - PORT=3001
-      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
-      - JWT_REFRESH_SECRET=banque_refresh_secret_2026
-      - JWT_EXPIRES=24h
-      - JWT_REFRESH_EXPIRES=7d
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-banque_refresh_secret_2026}
+      - JWT_EXPIRES=${JWT_EXPIRES:-24h}
+      - JWT_REFRESH_EXPIRES=${JWT_REFRESH_EXPIRES:-7d}
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=identity_db
       - ACCOUNT_SERVICE_URL=http://account-service:3002
     depends_on:
@@ -100,16 +100,16 @@ services:
       - "3002:3002"
     environment:
       - PORT=3002
-      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=account_db
-      - DAILY_TRANSFER_LIMIT_TND=10000
-      - KAFKA_BROKERS=kafka:9092
+      - DAILY_TRANSFER_LIMIT_TND=${DAILY_TRANSFER_LIMIT_TND:-10000}
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
       - TX_EVENTS_TOPIC=transaction.events
       - OUTBOX_POLL_MS=500
-      - REDIS_URL=redis://redis:6379
-      - BALANCE_CACHE_TTL=60
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - BALANCE_CACHE_TTL=${BALANCE_CACHE_TTL:-60}
     depends_on:
       cockroachdb:
         condition: service_healthy
@@ -127,10 +127,10 @@ services:
       - "3004:3004"
     environment:
       - PORT=3004
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=audit_db
-      - KAFKA_BROKERS=kafka:9092
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
       - TX_EVENTS_TOPIC=transaction.events
       - AUDIT_GROUP_ID=audit-workers
     depends_on:
@@ -147,8 +147,8 @@ services:
       - "3003:3003"
     environment:
       - PORT=3003
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=ledger_db
     depends_on:
       cockroachdb:
@@ -158,14 +158,14 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
-      - CORS_ORIGIN=http://localhost:5173,http://localhost:5174
+      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173,http://localhost:5174}
       - IDENTITY_SERVICE_URL=http://identity-service:3001
       - ACCOUNT_SERVICE_URL=http://account-service:3002
       - QUANTUM_SERVICE_URL=http://quantum-service:3005
       - KMS_SERVICE_URL=http://kms-service:3006
       - FRAUD_SERVICE_URL=http://fraud-service:3007
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
     depends_on:
       - identity-service
       - account-service
@@ -198,10 +198,10 @@ services:
     environment:
       - PORT=3006
       - QUANTUM_SERVICE_URL=http://quantum-service:3005
-      - REDIS_URL=redis://redis:6379
-      - KEY_TTL_SEC=300
-      - KEY_ROUNDS=3
-      - KEY_QUBITS=1024
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - KEY_TTL_SEC=${KEY_TTL_SEC:-300}
+      - KEY_ROUNDS=${KEY_ROUNDS:-3}
+      - KEY_QUBITS=${KEY_QUBITS:-1024}
     depends_on:
       redis:
         condition: service_healthy
@@ -219,11 +219,11 @@ services:
       - "3007:3007"
     environment:
       - PORT=3007
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=fraud_db
-      - REDIS_URL=redis://redis:6379
-      - KAFKA_BROKERS=kafka:9092
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
       - TX_EVENTS_TOPIC=transaction.events
       - TX_SCORED_TOPIC=transaction.scored
       - FRAUD_GROUP_ID=fraud-workers

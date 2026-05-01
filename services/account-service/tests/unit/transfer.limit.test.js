@@ -16,6 +16,12 @@ jest.mock("../../src/repositories/ledger.repository", () => ({
   insertEntry:    jest.fn(),
   sumDebitsSince: jest.fn(),
 }))
+jest.mock("../../src/repositories/outbox.repository", () => ({
+  enqueue:    jest.fn().mockResolvedValue("outbox-id"),
+  fetchPendingBatch: jest.fn(),
+  markSent:   jest.fn(),
+  markFailed: jest.fn(),
+}))
 
 const accountRepo = require("../../src/account.repository")
 const ledgerRepo  = require("../../src/repositories/ledger.repository")

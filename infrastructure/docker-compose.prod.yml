@@ -1,0 +1,48 @@
+# ──────────────────────────────────────────────────────────────────
+# Phase 5.2 — Production HTTPS overlay
+#
+# Adds a Caddy reverse proxy in front of api-gateway. Caddy handles
+# TLS termination automatically (Let's Encrypt for real domains, or
+# its built-in CA for `localhost`/`*.local`).
+#
+# Usage:
+#   cd infrastructure
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Required env vars (set in `infrastructure/.env`):
+#   CADDY_DOMAIN  — public hostname (or `localhost` for local TLS)
+#   CADDY_EMAIL   — contact email for Let's Encrypt notifications
+#
+# Notes:
+# - The api-gateway port (3000) is NOT exposed to the host in this
+#   overlay; only Caddy's 443/80 are reachable from outside Docker.
+# - For local dev WITHOUT TLS, just keep using `docker-compose.yml`
+#   alone — this overlay does not run.
+# ──────────────────────────────────────────────────────────────────
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      - CADDY_DOMAIN=${CADDY_DOMAIN:-localhost}
+      - CADDY_EMAIL=${CADDY_EMAIL:-admin@example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api-gateway
+
+  # Stop publishing the gateway directly when running with the prod
+  # overlay — all traffic must traverse Caddy for TLS termination.
+  api-gateway:
+    ports: !reset []
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -3,7 +3,87 @@
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — Phase 4: Quantum-ML Fraud Detection
+## [Unreleased] — Phase 5: NFR Hardening
+
+### Added (Phase 5.1 — Test coverage uplift)
+- New test suites:
+  - `services/account-service/tests/unit/cancel.transaction.test.js` —
+    Phase 4.4 `cancelTransaction` happy path, idempotency (`ALREADY_CANCELLED`),
+    `NOT_FOUND`, `INVALID_TARGET`, and required-arg validation.
+  - `services/account-service/tests/unit/transfer.deposit.test.js` —
+    transfer happy path (debit + credit + 2 outbox events), insufficient funds,
+    currency mismatch, same source/dest, validation; deposit happy path + missing
+    account.
+  - `services/account-service/tests/api/admin.cancel.test.js` — supertest cases
+    for `POST /admin/transactions/:id/cancel` covering 200/401/403/404/409/422/400
+    status mapping.
+  - `services/api-gateway/tests/proxy.test.js` — supertest cases for `/balance`,
+    `/transfer`, `/transactions`, `/transactions/:id`, `/withdraw`, `/admin/accounts/:id`,
+    `/docs.json`, plus upstream-error and network-error propagation.
+- `test:coverage` npm scripts on every node service that runs tests, with sensible
+  `coveragePathIgnorePatterns` for entry points and DB wrappers.
+
+### Coverage results (jest `--coverage`)
+- account-service: **66 %** statements, **61 %** branches (40/40 tests pass).
+- identity-service: **67 %** statements, **62 %** branches (25/25 tests pass).
+- ledger-service: **100 %** (13/13 tests pass).
+- api-gateway: **62 %** statements, **87 %** branches (11/11 tests pass).
+
+### Added (Phase 5.2 — HTTPS via Caddy)
+- `infrastructure/docker-compose.prod.yml` — production overlay starts a Caddy
+  2.8-alpine reverse proxy on ports 80 / 443 / 443 udp and uses Compose's
+  `!reset []` syntax to drop the api-gateway's direct port exposure.
+- `infrastructure/Caddyfile` — auto Let's Encrypt TLS, HSTS + standard security
+  headers, gzip / zstd, reverse proxy to `api-gateway:3000`, plus a
+  `/caddy-health` probe. Validated via `docker compose -f docker-compose.yml -f
+  docker-compose.prod.yml config --quiet`.
+
+### Added (Phase 5.3 — Centralized secrets / `.env`)
+- Rewrote `infrastructure/.env.example` as a comprehensive, **placeholder-only**
+  template covering JWT, Postgres, Kafka, Redis, KMS, IBM Quantum and Caddy.
+- Refactored `infrastructure/docker-compose.yml` so every secret/config value
+  uses `${VAR:-sensible_default}` substitution across identity-service,
+  account-service, audit-service, ledger-service, api-gateway, kms-service and
+  fraud-service. Defaults preserve the dev workflow when no `.env` is loaded;
+  production loads real values from the operator's `.env`.
+
+### Added (Phase 5.4 — Comparative analysis report)
+- `services/fraud-service/src/eval_compare.py` — loads the trained baseline
+  (`baseline-lr-v1`) and quantum (`vqc-zz-realamp-v1`) bundles, regenerates a
+  fresh seeded test set, scores each sample one at a time and measures p50
+  per-sample latency. Prints a JSON report after the `---REPORT-JSON---`
+  separator.
+- `docs/comparative-analysis.md` — academic deliverable: setup table, real
+  numbers from a container run (classical P/R/F1/AUC = 1.000, latency
+  0.135 ms/sample; quantum P=0.090, R=0.500, F1=0.153, AUC=0.485, latency
+  3.875 ms/sample), honest discussion of why the under-resourced 4-qubit
+  VQC underperforms on this synthetic, linearly-separable signal, and exact
+  reproduction steps.
+
+### Fixed (Phase 5.1 — test infrastructure)
+- `services/account-service/tests/unit/transfer.limit.test.js` — added a mock for
+  the new `outbox.repository` so the suite works after the Phase 1.2 outbox
+  insertion was added inside `transfer`.
+- `services/api-gateway/src/server.js` — guarded `app.listen` with
+  `require.main === module` so supertest can require the module without binding
+  the port.
+- `services/ledger-service/package.json` — replaced the broken
+  `^../../../shared/db$` mapping with the same regex-based mapper used in
+  account-service so jest can resolve `/shared/...` imports on the host.
+- Added `jest` + `supertest` devDeps to api-gateway (previously missing).
+
+### Security
+- **IBM Quantum credentials previously committed** to `infrastructure/.env.example`
+  (Phase 3.5) are now removed from the working tree. They must be **rotated** at
+  https://quantum.ibm.com/account; the value still exists in git history.
+- New env file is sanitized; no real tokens, passwords or private keys remain
+  in tracked files.
+
+### Tooling
+- `graphify` mention (Phase 0.5) — `graphify-out/` artifacts continue to
+  document module dependencies; no code change.
+
+
 
 ### Added (Phase 4.5 — Staff Fraud Dashboard)
 - `staff_frontend/src/pages/FraudPage.jsx` — single React component
