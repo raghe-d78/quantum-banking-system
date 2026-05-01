@@ -65,16 +65,24 @@ def qrng_endpoint():
 
 @app.post("/qkd/bb84")
 def bb84_endpoint():
-    """FR-14 — BB84 simulation with optional Eve, QBER>11% rejection, majority vote."""
+    """FR-14 — BB84 simulation with optional Eve, QBER>11% rejection, majority vote.
+
+    Optional body field `backend` overrides the global QUANTUM_BACKEND env
+    for this request only ("simulator" or "ibm"). This lets KMS keep minting
+    against the fast simulator while ad-hoc /qkd/bb84 calls hit real hardware.
+    """
     body = request.get_json(silent=True) or {}
     try:
         n_qubits = int(body.get("n_qubits", 256))
         rounds = int(body.get("rounds", 3))
         with_eve = bool(body.get("with_eve", False))
         qber_threshold = float(body.get("qber_threshold", 0.11))
+        req_backend = str(body.get("backend", BACKEND)).lower()
     except (TypeError, ValueError) as e:
         return jsonify(error=f"bad params: {e}"), 400
 
+    if req_backend not in ("simulator", "ibm"):
+        return jsonify(error="backend must be 'simulator' or 'ibm'"), 400
     if n_qubits < 8 or n_qubits > 1024:
         return jsonify(error="n_qubits must be in [8, 1024]"), 400
     if rounds < 1 or rounds > 9:
@@ -85,7 +93,7 @@ def bb84_endpoint():
         rounds=rounds,
         with_eve=with_eve,
         qber_threshold=qber_threshold,
-        backend=BACKEND,
+        backend=req_backend,
     )
     return jsonify(result), (200 if result.get("accepted") else 422)
 

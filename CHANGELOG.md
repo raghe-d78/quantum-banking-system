@@ -8,7 +8,52 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## [Unreleased] — Phase 3: Quantum compute + Key Management Service
+## [Unreleased] — Phase 3.5: IBM Quantum hardware execution
+
+### Added
+- **Real IBM Quantum execution path** in `qrng.py` and `bb84.py`. When
+  `QUANTUM_BACKEND=ibm`, circuits are transpiled to the selected backend
+  (via `service.least_busy(operational=True, simulator=False, min_num_qubits=…)`)
+  and executed with `qiskit_ibm_runtime.SamplerV2`. Every IBM job logs
+  `job_id` + `backend.name` for traceability.
+- **Per-request backend override** on `POST /qkd/bb84` (`{"backend":"ibm"}`).
+  Lets the KMS service keep minting against the fast simulator while
+  ad-hoc QKD demos can target real hardware. Validation rejects anything
+  other than `simulator` or `ibm`.
+- **KMS hardcoded to `backend:"simulator"`** in its BB84 call so key
+  minting stays sub-second and quota-free even when global env is `ibm`.
+- **IBM safety caps**: `bb84.run_bb84` clamps `n_qubits` to 32 on IBM
+  (queue/quota guard); `qrng._refill_ibm` uses 64-qubit chunks and 256
+  shots/refill (vs. simulator's 16/4096) to keep wall time bounded.
+- **Multi-tier fallback**: IBM → Aer simulator → `secrets.token_bytes`,
+  each transition logged.
+- **`infrastructure/.env`** populated locally (gitignored) with
+  `QUANTUM_BACKEND=ibm`, `QRNG_BUFFER_BYTES=512`, plus the user's
+  `IBM_QUANTUM_TOKEN` / `IBM_QUANTUM_CRN`. Template remains in
+  `infrastructure/.env.example`.
+
+### Verified on real IBM hardware (`ibm_fez`, Heron-r2, 156q)
+- BB84 16q / 1 round / no Eve  → job `d7qbeoc3lfgs73fh008g`,
+  QBER=0.0, accepted, 5-bit key. Elapsed: **57s** end-to-end (queue + run).
+- BB84 16q / 1 round / with Eve → job `d7qbfdm7g7gs73cfvfjg`,
+  **QBER=0.50**, all rounds rejected (HTTP 422). Eavesdropping
+  successfully detected on real superconducting qubits, not a simulation.
+  Elapsed: **103s**.
+- KMS regression (after switch back): mint 256-bit key in **1s** via
+  forced simulator path.
+
+### Notes
+- The BB84-with-Eve QBER on real hardware (0.50) is higher than the
+  textbook ~0.25 because gate/readout noise on `ibm_fez` adds to Eve's
+  intercept-resend errors. With `qber_threshold=0.20` (loosened from 0.11
+  for hardware), this still cleanly distinguishes "Eve present" from
+  "no Eve" baseline (which measured QBER=0.0 on this run, lucky — typical
+  is 1–5% on Heron-r2).
+- IBM Cloud Open plan ≈ 10 min QPU/month. Each BB84 round consumes
+  roughly 30s of QPU; budget accordingly. Switch back to
+  `QUANTUM_BACKEND=simulator` for daily dev/demo work.
+
+
 
 ### Added
 - **`services/quantum-service/`** — Python 3.11 + Flask + Qiskit 1.2 service

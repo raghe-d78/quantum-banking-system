@@ -27,6 +27,7 @@ app.post("/kms/keys", async (_req, res) => {
   try {
     const { data } = await axios.post(`${QSVC}/qkd/bb84`, {
       n_qubits: QUBITS, rounds: ROUNDS, with_eve: false, qber_threshold: 0.11,
+      backend: "simulator",   // KMS always uses simulator for fast/free key derivation
     }, { timeout: 30000 })
 
     if (!data.accepted || !data.key_bits || data.key_length < 256) {
