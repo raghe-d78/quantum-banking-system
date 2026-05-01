@@ -254,6 +254,37 @@ app.get("/kms/keys/:kid", (req, res) =>
   }))
 );
 
+// ── FRAUD → fraud-service (Phase 4) ───────────────────────────────
+const FRAUD_SERVICE_URL = process.env.FRAUD_SERVICE_URL || "http://fraud-service:3007";
+
+app.get("/fraud/stats", (req, res) =>
+  proxy(res, () => axios.get(`${FRAUD_SERVICE_URL}/fraud/stats`, { headers: authHeader(req) }))
+);
+app.get("/fraud/alerts", (req, res) =>
+  proxy(res, () => axios.get(`${FRAUD_SERVICE_URL}/fraud/alerts`, {
+    headers: authHeader(req), params: req.query,
+  }))
+);
+app.get("/fraud/model-info", (req, res) =>
+  proxy(res, () => axios.get(`${FRAUD_SERVICE_URL}/fraud/model-info`, { headers: authHeader(req) }))
+);
+app.post("/fraud/score", (req, res) =>
+  proxy(res, () => axios.post(`${FRAUD_SERVICE_URL}/fraud/score`, req.body, {
+    headers: authHeader(req), timeout: 30000,
+  }))
+);
+
+// ── Admin: cancel a fraudulent transaction (Phase 4.4) ────────────
+app.post("/admin/transactions/:id/cancel", (req, res) =>
+  proxy(res, () =>
+    axios.post(
+      `${ACCOUNT_SERVICE_URL}/admin/transactions/${req.params.id}/cancel`,
+      req.body,
+      { headers: authHeader(req), timeout: 15000 }
+    )
+  )
+);
+
 // ── Health ────────────────────────────────────────────────────────
 app.get("/health", (req, res) => res.json({ status: "gateway running" }));
 

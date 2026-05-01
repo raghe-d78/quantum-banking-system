@@ -69,7 +69,7 @@ services:
         condition: service_healthy
     entrypoint: ["/bin/bash","-c"]
     command:
-      - "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.events --partitions 3 --replication-factor 1 --config retention.ms=604800000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic audit.logs --partitions 1 --replication-factor 1 --config retention.ms=2592000000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list"
+      - "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.events --partitions 3 --replication-factor 1 --config retention.ms=604800000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic audit.logs --partitions 1 --replication-factor 1 --config retention.ms=2592000000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.scored --partitions 3 --replication-factor 1 --config retention.ms=604800000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.cancelled --partitions 3 --replication-factor 1 --config retention.ms=2592000000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list"
     restart: "no"
 
   identity-service:
@@ -164,6 +164,7 @@ services:
       - ACCOUNT_SERVICE_URL=http://account-service:3002
       - QUANTUM_SERVICE_URL=http://quantum-service:3005
       - KMS_SERVICE_URL=http://kms-service:3006
+      - FRAUD_SERVICE_URL=http://fraud-service:3007
       - REDIS_URL=redis://redis:6379
     depends_on:
       - identity-service
@@ -206,3 +207,31 @@ services:
         condition: service_healthy
       quantum-service:
         condition: service_started
+
+  # ── Phase 4 — Fraud detection (classical baseline + quantum VQC) ─
+  # Consumes transaction.events, scores with both models, publishes
+  # transaction.scored, persists Critical/High verdicts to fraud_db.
+  fraud-service:
+    build:
+      context: ..
+      dockerfile: services/fraud-service/Dockerfile
+    ports:
+      - "3007:3007"
+    environment:
+      - PORT=3007
+      - DB_HOST=cockroachdb
+      - DB_PORT=26257
+      - DB_NAME=fraud_db
+      - REDIS_URL=redis://redis:6379
+      - KAFKA_BROKERS=kafka:9092
+      - TX_EVENTS_TOPIC=transaction.events
+      - TX_SCORED_TOPIC=transaction.scored
+      - FRAUD_GROUP_ID=fraud-workers
+      - FRAUD_MODELS_DIR=/app/models
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

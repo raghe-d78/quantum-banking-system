@@ -259,6 +259,27 @@ router.get("/admin/accounts/:id", authenticate, requireStaff, async (req, res) =
     res.status(404).json({ message: err.message });
   }
 });
+
+// ── Phase 4.4 — Admin cancellation of a (fraudulent) transaction ──
+router.post("/admin/transactions/:id/cancel", authenticate, requireStaff, async (req, res) => {
+  try {
+    const reason = req.body?.reason
+    const result = await accountService.cancelTransaction(req.params.id, {
+      reason,
+      cancelledBy: req.user.userId,
+    })
+    res.status(200).json(result)
+  } catch (err) {
+    const status =
+      err.code === "ALREADY_CANCELLED" ? 409 :
+      err.code === "NOT_FOUND"         ? 404 :
+      err.code === "INVALID_TARGET"    ? 422 :
+      err.message?.includes("required") ? 400 : 500
+    const body = { ok: false, code: err.code || "ERR", message: err.message }
+    if (err.existing) body.existing = err.existing
+    res.status(status).json(body)
+  }
+})
  
 
 // Health check

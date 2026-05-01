@@ -465,3 +465,175 @@ exports.withdraw = async (accountId, amount, note) => {
     ledgerClient.release();
   }
 };
+// ─────────────────────────────────────────────────────────────────────
+// Phase 4.4 — Cancel a fraudulent transaction.
+//
+// Writes COMPENSATING ledger entries (never UPDATE/DELETE) and an outbox
+// event `transaction.cancelled` in the SAME ledger transaction. Idempotent
+// on `originalTransactionId` via a unique row in `cancelled_transactions`.
+//
+// Compensating entry rules:
+//   - For every ledger row with transaction_id = original_tx_id, insert a
+//     reverse-type row of equal amount (CREDIT ↔ DEBIT) tagged with
+//     compensates = original_ledger_entry_id.
+//   - Lock affected accounts FOR UPDATE in deterministic id order to avoid
+//     deadlocks when multiple cancellations interleave.
+//   - Recompute balance_snapshot from the locked account row + new delta.
+//   - Each compensation gets a NEW transaction_id so it does not collide
+//     with the original on `event_outbox.transaction_id` (PRIMARY KEY).
+// ─────────────────────────────────────────────────────────────────────
+const CANCELLED_TOPIC = process.env.TX_CANCELLED_TOPIC || "transaction.cancelled"
+
+exports.cancelTransaction = async (originalTransactionId, { reason, cancelledBy }) => {
+  if (!originalTransactionId) throw new Error("originalTransactionId required")
+  if (!reason || String(reason).trim().length < 3) throw new Error("reason required (min 3 chars)")
+  if (!cancelledBy) throw new Error("cancelledBy required")
+
+  const accountClient = await accountRepo.pool.connect()
+  const ledgerClient  = await ledgerRepo.pool.connect()
+  const cancellationId = uuidv4()
+
+  try {
+    await accountClient.query("BEGIN")
+    await ledgerClient.query("BEGIN")
+
+    // 1) Idempotency check — fail fast if already cancelled.
+    const existing = await ledgerClient.query(
+      `SELECT cancellation_id, reason, cancelled_by, cancelled_at
+         FROM cancelled_transactions
+        WHERE original_transaction_id = $1`,
+      [originalTransactionId]
+    )
+    if (existing.rows.length) {
+      await accountClient.query("ROLLBACK")
+      await ledgerClient.query("ROLLBACK")
+      const e = new Error("Transaction already cancelled")
+      e.code = "ALREADY_CANCELLED"
+      e.existing = existing.rows[0]
+      throw e
+    }
+
+    // 2) Load original ledger entries for this transaction. Reject if any of
+    //    them is itself a compensation (cannot reverse a reversal).
+    const orig = await ledgerClient.query(
+      `SELECT id, account_id, type, amount, reference, compensates
+         FROM ledger_entries
+        WHERE transaction_id = $1
+        ORDER BY account_id ASC`,
+      [originalTransactionId]
+    )
+    if (orig.rows.length === 0) {
+      const e = new Error("Original transaction not found")
+      e.code = "NOT_FOUND"
+      throw e
+    }
+    if (orig.rows.some(r => r.compensates !== null && r.compensates !== undefined)) {
+      const e = new Error("Cannot cancel a compensating entry")
+      e.code = "INVALID_TARGET"
+      throw e
+    }
+
+    // 3) Lock ALL affected accounts in deterministic order (sorted ids).
+    const accountIds = [...new Set(orig.rows.map(r => r.account_id))].sort()
+    const lockedAccounts = {}
+    for (const accId of accountIds) {
+      const acc = await accountRepo.getAccountForUpdate(accountClient, accId)
+      if (!acc) throw new Error(`Account ${accId} not found during cancellation`)
+      lockedAccounts[accId] = acc
+    }
+
+    // 4) For each original entry: write a reverse entry + update balance.
+    const compensations = []
+    for (const e of orig.rows) {
+      const acc        = lockedAccounts[e.account_id]
+      const currency   = acc.currency
+      const balMoney   = new Money(acc.cached_balance, currency)
+      const amtMoney   = new Money(e.amount, currency)
+      const reverseType = e.type === "DEBIT" ? "CREDIT" : "DEBIT"
+      const newBalMoney = reverseType === "CREDIT" ? balMoney.add(amtMoney) : balMoney.subtract(amtMoney)
+      const newBalance  = Number(newBalMoney.toFixed(4))
+
+      const compEntry = {
+        id:               uuidv4(),
+        transactionId:    cancellationId,           // distinct tx_id for outbox PK
+        accountId:        e.account_id,
+        type:             reverseType,
+        amount:           Number(amtMoney.toFixed(4)),
+        balance_snapshot: newBalance,
+        reference:        `Cancellation of ${originalTransactionId}: ${reason}`,
+        created_at:       new Date().toISOString(),
+      }
+      // ledger.repository's insertEntry helper doesn't know about `compensates`,
+      // so we INSERT directly so the FK-style tag column is set atomically.
+      await ledgerClient.query(
+        `INSERT INTO ledger_entries
+           (id, transaction_id, account_id, type, amount, balance_snapshot, reference, created_at, compensates)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        [compEntry.id, compEntry.transactionId, compEntry.accountId, compEntry.type,
+         compEntry.amount, compEntry.balance_snapshot, compEntry.reference, compEntry.created_at, e.id]
+      )
+      await accountRepo.updateBalance(accountClient, e.account_id, newBalMoney.toFixed(4))
+      lockedAccounts[e.account_id] = { ...acc, cached_balance: newBalMoney.toFixed(4) }
+      compensations.push({
+        compensatesLedgerId: e.id,
+        accountId:           e.account_id,
+        type:                reverseType,
+        amount:              compEntry.amount,
+        balanceSnapshot:     newBalance,
+      })
+    }
+
+    // 5) Mark cancellation in registry.
+    await ledgerClient.query(
+      `INSERT INTO cancelled_transactions
+         (original_transaction_id, cancellation_id, reason, cancelled_by)
+       VALUES ($1, $2, $3, $4)`,
+      [originalTransactionId, cancellationId, reason, cancelledBy]
+    )
+
+    // 6) Outbox event — relayed to Kafka by the existing relay loop.
+    await outboxRepo.enqueue(ledgerClient, {
+      transactionId: cancellationId,
+      topic:         CANCELLED_TOPIC,
+      partitionKey:  accountIds[0],
+      payload: {
+        type:                  "TRANSACTION_CANCELLED",
+        originalTransactionId,
+        cancellationId,
+        reason,
+        cancelledBy,
+        affectedAccounts:      accountIds,
+        compensations,
+        timestamp:             new Date().toISOString(),
+      },
+    })
+
+    await accountClient.query("COMMIT")
+    await ledgerClient.query("COMMIT")
+
+    // 7) Invalidate balance caches for every affected user.
+    for (const accId of accountIds) {
+      try {
+        const acc = await accountRepo.findById(accId)
+        if (acc) invalidateBalanceFor(acc.user_id).catch(() => {})
+      } catch (_) {}
+    }
+
+    return {
+      ok:                    true,
+      originalTransactionId,
+      cancellationId,
+      reason,
+      cancelledBy,
+      affectedAccounts:      accountIds,
+      compensations,
+    }
+  } catch (err) {
+    try { await accountClient.query("ROLLBACK") } catch (_) {}
+    try { await ledgerClient.query("ROLLBACK")  } catch (_) {}
+    throw err
+  } finally {
+    accountClient.release()
+    ledgerClient.release()
+  }
+}

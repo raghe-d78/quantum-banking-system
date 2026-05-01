@@ -3,10 +3,121 @@
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-# Changelog
+## [Unreleased] — Phase 4: Quantum-ML Fraud Detection
 
-All notable changes to the Quantum Banking System are documented in this file.
-Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
+### Verified (this session)
+- `fraud-service` boots cleanly with `qiskit-machine-learning==0.8.2`
+  (previous `0.7.2` pulled `qiskit-algorithms` which is incompatible with
+  `qiskit==1.2.4`). VQC training completes in ~70 s on a 300-sample
+  stratified subset.
+- Live consumer processed `207` events from `transaction.events`,
+  generated `168` open alerts (`122 Critical / 46 High / 39 Medium`),
+  persisted both `fraud_scores` and `fraud_alerts` rows idempotently.
+- Synchronous `POST /fraud/score` returns full classical+quantum bundle
+  with `_features` and `_diagnostics`. `GET /fraud/stats` reflects DB
+  counts. `GET /health` reports `db: true`, `consumer: running`.
+- Staff cancel route `POST /admin/transactions/:id/cancel` proxied
+  through api-gateway and protected by `requireStaff` (returns `401`
+  unauthenticated, confirming wiring).
+- All 5 unit tests in `services/fraud-service/tests/test_fraud_unit.py`
+  pass inside the running container.
+
+
+### Added
+- **`services/fraud-service`** (Python/Flask, port `3007`) — new sibling
+  microservice implementing the spec's quantum-enhanced fraud detection
+  layer (FR-09, FR-16). Single Gunicorn worker hosts both the HTTP API and
+  the Kafka consumer thread.
+- **Synthetic dataset generator** (`src/dataset.py`) — 10 000 normal +
+  1 000 fraudulent transactions with planted signals (large amounts,
+  off-hour timestamps, bursty velocity, heavy 24h activity). Deterministic
+  seed for reproducibility.
+- **Versioned feature pipeline** (`src/features.py`) — 7 features:
+  `log1p(amount)`, cyclic hour/dow encoding, true 24h sliding window
+  (count + log-sum) backed by a Redis sorted set with
+  `ZADD` + `ZREMRANGEBYSCORE` and per-tx amount hash. `FEATURE_SCHEMA_VERSION`
+  is embedded in every model artifact and event so retraining is forced
+  on schema mismatch.
+- **Classical baseline** (`src/baseline.py`) — `sklearn.LogisticRegression`
+  (class-weight balanced) wrapped in a bundle that persists the fitted
+  scaler + model + metadata together (`baseline.pkl` + `baseline.json`).
+- **Quantum classifier** (`src/vqc.py`) — Qiskit Machine Learning `VQC`
+  with `ZZFeatureMap(reps=1)` + `RealAmplitudes(reps=1)`, COBYLA
+  (`maxiter=60`), 4 qubits, PCA(7→4) + per-component scaler. Trained on a
+  300-sample stratified subset to keep cold start tractable.
+  Bundle persists PCA + scaler + weights + metadata
+  (`vqc_pre.pkl` + `vqc.npz` + `vqc.json`).
+- **Risk thresholds & decision policy** (`src/risk.py`) — Low <0.25,
+  Medium <0.50, High <0.75, Critical ≥0.75; final risk uses
+  `decisionScore = max(classical_score, quantum_score)` and the policy
+  string is recorded on every event for auditability.
+- **Kafka pipeline** (`src/consumer.py`) — `confluent-kafka` consumer on
+  `transaction.events` (group `fraud-workers`, manual commit) → score with
+  both models → publish `transaction.scored` (per-account key) → persist
+  to `fraud_scores` (PK = `transaction_id`, idempotent on Kafka redelivery)
+  → write `fraud_alerts` row when risk is High/Critical. Commit happens
+  only after persistence + produce flush, giving effectively-exactly-once
+  end-to-end semantics.
+- **HTTP API** (`src/app.py`):
+  - `GET  /health` — model versions, consumer status, DB ping
+  - `GET  /fraud/stats` — counts per risk level + open alerts +
+    consumer counters
+  - `GET  /fraud/alerts?limit=N` — recent alerts
+  - `POST /fraud/score` — ad-hoc scoring (admin/debug, schema-versioned)
+  - `GET  /fraud/model-info` — full bundle metadata (precision/recall/
+    F1/ROC-AUC for both models)
+- **`fraud_db` schema** (`scripts/init-db.sql`):
+  - `fraud_scores` — every score, `risk_level CHECK`, JSONB features,
+    indexed by `(account_id, scored_at DESC)` and
+    `(risk_level, scored_at DESC)`.
+  - `fraud_alerts` — High/Critical only, status workflow OPEN /
+    CANCELLED / DISMISSED, JSONB payload, indexed by status.
+- **`transaction.scored`** Kafka topic (3 partitions, 7 d retention) and
+  **`transaction.cancelled`** topic (3 partitions, 30 d retention) added
+  to `kafka-init`.
+- **API gateway routes** (`/fraud/stats`, `/fraud/alerts`,
+  `/fraud/model-info`, `/fraud/score`) proxied to fraud-service, plus
+  `/admin/transactions/:id/cancel` proxied to account-service.
+
+### Phase 4.4 — Cancel-fraudulent-transaction
+- **`POST /admin/transactions/:id/cancel`** on account-service
+  (`requireStaff` middleware). Body: `{ "reason": "..." }`. Implementation
+  in `account.service.cancelTransaction`:
+  - Idempotent on `originalTransactionId` via new
+    `ledger_db.cancelled_transactions` table (PK).
+  - Compensating ledger entries (never UPDATE/DELETE): for every original
+    row a reverse-type row (CREDIT↔DEBIT) of equal amount is inserted with
+    a new `compensates` column pointing at the original ledger entry id.
+  - Locks every affected account `FOR UPDATE` in deterministic id order to
+    avoid deadlocks under concurrent cancellations.
+  - Refuses to cancel a row that is itself a compensation (`INVALID_TARGET`,
+    HTTP 422) or one that is already cancelled (`ALREADY_CANCELLED`,
+    HTTP 409, returns the existing cancellation record).
+  - Emits `transaction.cancelled` Kafka event via the existing outbox in
+    the same DB transaction; payload lists every compensating delta and
+    new balance snapshot.
+  - Invalidates Redis balance cache for every affected user post-commit.
+
+### Schema changes
+- **New `fraud_db`** with `fraud_scores`, `fraud_alerts`.
+- **New `ledger_db.cancelled_transactions`** table.
+- **`ledger_db.ledger_entries`** gains nullable `compensates UUID` column
+  (+ partial index) to tag reversal rows. Existing rows untouched.
+
+### Tests
+- `services/fraud-service/tests/test_fraud_unit.py` covers the pure feature
+  vectorizer, threshold ladder, max-policy decision, and event payload
+  shape. No external dependencies needed.
+
+### Notes / known limitations
+- The VQC bundle is trained at first container start (~1–2 min) if the
+  artifact files are missing, then cached on subsequent boots. This keeps
+  the build fast and avoids shipping 100 MB+ pickles in the repo.
+- Inference per transaction is ~3 ms classical + ~80 ms quantum on the
+  Aer simulator; production-scale throughput would require batching or
+  routing only suspicious cases through the VQC.
+- Frontend dashboards (Phase 4.5 — staff `/fraud/alerts` page, customer
+  notification banner) are deferred to a follow-up commit.
 
 ## [Unreleased] — Phase 3.5: IBM Quantum hardware execution
 
