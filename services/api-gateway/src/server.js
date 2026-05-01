@@ -2,8 +2,15 @@
 const express = require("express");
 const cors    = require("cors");
 const axios   = require("axios");
+const rateLimit = require("express-rate-limit");
+const swaggerUi = require("swagger-ui-express");
+const openapiSpec = require("./openapi");
 
 const app = express();
+
+// Trust the docker network proxy hop so req.ip resolves to the real client IP
+// (otherwise express-rate-limit would key everyone under the same gateway IP).
+app.set("trust proxy", 1);
 
 // ── CORS ──────────────────────────────────────────────────────────
 const allowedOrigins = (process.env.CORS_ORIGIN || "http://localhost:5173,http://localhost:5174")
@@ -17,6 +24,36 @@ app.use(cors({
 }));
 app.options("*", cors({ origin: allowedOrigins }));
 app.use(express.json());
+
+// ── Rate limiting (Phase 0.4) ─────────────────────────────────────
+// Brute-force / credential-stuffing defense for the auth surface.
+// Tunable via env so tests can crank it up.
+const AUTH_RL_WINDOW_MS = Number(process.env.AUTH_RL_WINDOW_MS || 15 * 60 * 1000); // 15m
+const AUTH_RL_MAX       = Number(process.env.AUTH_RL_MAX       || 20);             // 20 / IP / window
+
+const authLimiter = rateLimit({
+  windowMs: AUTH_RL_WINDOW_MS,
+  max:      AUTH_RL_MAX,
+  standardHeaders: true,    // RateLimit-* headers (RFC draft)
+  legacyHeaders:   false,   // disable old X-RateLimit-*
+  message: { message: "Too many authentication attempts, please try again later." },
+  skip: (req) => req.method === "OPTIONS",   // never throttle CORS preflights
+});
+
+// Mount BEFORE the route handlers so it covers every /auth/* endpoint.
+app.use("/auth", authLimiter);
+
+// ── OpenAPI / Swagger (Phase 0.5) ─────────────────────────────────
+// Spec available as JSON at /docs.json, interactive UI at /docs.
+app.get("/docs.json", (_req, res) => res.json(openapiSpec));
+app.use(
+  "/docs",
+  swaggerUi.serve,
+  swaggerUi.setup(openapiSpec, {
+    customSiteTitle: "Quantum Banking API",
+    swaggerOptions: { persistAuthorization: true },
+  })
+);
 
 // ── Service URLs ──────────────────────────────────────────────────
 const IDENTITY_SERVICE_URL = process.env.IDENTITY_SERVICE_URL || "http://identity-service:3001";
@@ -53,6 +90,16 @@ app.get("/auth/me", (req, res) =>
   proxy(res, () =>
     axios.get(`${IDENTITY_SERVICE_URL}/auth/me`, { headers: authHeader(req) })
   )
+);
+
+// Refresh access token
+app.post("/auth/refresh", (req, res) =>
+  proxy(res, () => axios.post(`${IDENTITY_SERVICE_URL}/auth/refresh`, req.body))
+);
+
+// Logout (revoke refresh token)
+app.post("/auth/logout", (req, res) =>
+  proxy(res, () => axios.post(`${IDENTITY_SERVICE_URL}/auth/logout`, req.body))
 );
 
 // ── ADMIN → identity-service ──────────────────────────────────────
