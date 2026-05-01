@@ -1,0 +1,11 @@
+{
+  "input_tokens": 0,
+  "output_tokens": 0,
+  "total_tokens": 0,
+  "estimated_cost_usd": 0.0,
+  "raw_tokens_estimate": 570142,
+  "graph_tokens_estimate": 35372,
+  "token_reduction_pct": 93.8,
+  "files_processed": 85,
+  "words_processed": 438571
+}

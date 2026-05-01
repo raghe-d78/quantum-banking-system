@@ -19,7 +19,7 @@ exports.exportCSV = async (userId, filters) => {
     "TND",
     tx.balanceSnapshot.toFixed(4),
     tx.reference ?? "",
-    tx.initiatedBy,
+    tx.initiatedBy ?? "—",
   ]);
 
   const csv = [headers, ...rows]
@@ -50,7 +50,7 @@ exports.exportPDF = async (userId, filters, userInfo = {}) => {
         ${tx.type === "CREDIT" ? "+" : "−"}${fmt(tx.amount)} TND
       </td>
       <td style="text-align:right;">${fmt(tx.balanceSnapshot)} TND</td>
-      <td>${tx.initiatedBy}</td>
+      <td>${tx.initiatedBy ?? "—"}</td>
     </tr>
   `).join("");
 

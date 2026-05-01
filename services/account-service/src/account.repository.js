@@ -1,46 +1,4 @@
 // services/account-service/src/account.repository.js
-const createPool = require("/shared/db")
-
-const pool = createPool("account_db")
-
-exports.create = async ({ userId, currency = "TND" }) => {
-  const result = await pool.query(
-    `INSERT INTO accounts (user_id, balance, currency)
-     VALUES ($1, 0.000, $2)
-     RETURNING id, user_id, balance, currency, created_at`,
-    [userId, currency]
-  )
-  return result.rows[0]
-}
-
-exports.findByUserId = async (userId) => {
-  const result = await pool.query(
-    "SELECT * FROM accounts WHERE user_id = $1",
-    [userId]
-  )
-  return result.rows[0]
-}
-
-exports.findById = async (id) => {
-  const result = await pool.query(
-    "SELECT * FROM accounts WHERE id = $1",
-    [id]
-  )
-  return result.rows[0]
-}
-
-exports.getAccountForUpdate = async (client, accountId) => {
-  const result = await client.query(
-    "SELECT * FROM accounts WHERE id=$1 FOR UPDATE",
-    [accountId]
-  )
-  return result.rows[0]
-}
-
-
-exports.updateBalance = async (client, accountId, newBalance) => {
-  await client.query(
-    "UPDATE accounts SET balance=$1 WHERE id=$2",
-    [newBalance, accountId]
-  )
-}
+// DEPRECATED shim — kept so legacy tests and any stragglers still resolve.
+// All real logic lives in ./repositories/account.repository.js
+module.exports = require("./repositories/account.repository")

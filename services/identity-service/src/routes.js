@@ -89,6 +89,30 @@ router.get("/admin/users", authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+// GET /admin/users/lookup/:value — find user by id, username, or email.
+// Used by account-service to resolve staff lookups.
+router.get("/admin/users/lookup/:value", authenticate, requireStaff, async (req, res) => {
+  try {
+    const { value } = req.params;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+    let user = null;
+    if (isUuid) {
+      try { user = await userService.getUser(value); } catch (_) { user = null; }
+    }
+    if (!user) {
+      const userRepo = require("./user.repository");
+      const found =
+        (await userRepo.findByUsername(value)) ||
+        (await userRepo.findByEmail(value));
+      if (found) user = await userService.getUser(found.id);
+    }
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json({ user });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // GET /admin/users/:id — get single user
 router.get("/admin/users/:id", authenticate, requireStaff, async (req, res) => {
   try {
