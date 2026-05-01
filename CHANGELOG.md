@@ -5,6 +5,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased] — Phase 5: NFR Hardening
 
+### Added (Documentation — Usage guide & code-graph visualization)
+- `docs/USAGE_GUIDE.md` — end-to-end walkthrough: prerequisites, full
+  stack boot, port map, frontend startup, customer + staff UI journeys
+  (table-driven, page-by-page), quantum/fraud manual probes, automated
+  test commands, prod (HTTPS) mode, teardown, and troubleshooting.
+- `docs/code-graph.md` — describes the graphify-generated knowledge
+  graph (173 nodes / 128 edges / 69 communities) and how to regenerate
+  the PNG via puppeteer.
+- `docs/graphify-graph.png` — headless-rendered screenshot of
+  `graphify-out/graph.html` (1920×1200), embedded in `README.md`.
+- `README.md` — new "Code knowledge graph" section with the embedded
+  PNG, plus a top-of-file pointer to the new usage guide; TOC updated.
+
+## [Unreleased] — Phase 5: NFR Hardening
+
 ### Added (Phase 5.1 — Test coverage uplift)
 - New test suites:
   - `services/account-service/tests/unit/cancel.transaction.test.js` —

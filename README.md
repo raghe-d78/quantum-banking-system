@@ -28,8 +28,13 @@
 11. [Repository layout](#repository-layout)
 12. [Phase-by-phase changelog](#phase-by-phase-changelog)
 13. [Comparative analysis (classical vs. quantum)](#comparative-analysis-classical-vs-quantum)
-14. [Troubleshooting](#troubleshooting)
-15. [Contributing & licensing](#contributing--licensing)
+14. [Code knowledge graph](#code-knowledge-graph)
+15. [Troubleshooting](#troubleshooting)
+16. [Contributing & licensing](#contributing--licensing)
+
+> 👉 **New here?** A step-by-step end-to-end run-through (boot stack,
+> create users, click through both UIs, exercise the quantum + fraud
+> features) lives in [`docs/USAGE_GUIDE.md`](docs/USAGE_GUIDE.md).
 
 ---
 
@@ -427,6 +432,23 @@ Reproduce with:
 ```bash
 docker exec -w /app infrastructure-fraud-service-1 python -m src.eval_compare
 ```
+
+---
+
+## Code knowledge graph
+
+The whole repository is indexed by [graphify](https://npm.im/graphify-mcp-tools)
+into a navigable code graph: **173 nodes · 128 edges · 69 communities**
+across 85 source files. The clusters map 1-to-1 onto the bounded
+contexts (Money value object, quantum stack, transfer wizard, auth
+routes, …).
+
+![Graphify code graph](docs/graphify-graph.png)
+
+- Interactive version: [`graphify-out/graph.html`](graphify-out/graph.html)
+  (open locally — full-text search, click-to-inspect, community filter).
+- Markdown summary: [`graphify-out/GRAPH_REPORT.md`](graphify-out/GRAPH_REPORT.md).
+- How to regenerate the graph and re-shoot the PNG: [`docs/code-graph.md`](docs/code-graph.md).
 
 ---
 
