@@ -3,6 +3,8 @@ const express = require("express");
 const cors    = require("cors");
 const axios   = require("axios");
 const rateLimit = require("express-rate-limit");
+const { RedisStore } = require("rate-limit-redis");
+const { createClient } = require("redis");
 const swaggerUi = require("swagger-ui-express");
 const openapiSpec = require("./openapi");
 
@@ -25,19 +27,31 @@ app.use(cors({
 app.options("*", cors({ origin: allowedOrigins }));
 app.use(express.json());
 
-// ── Rate limiting (Phase 0.4) ─────────────────────────────────────
+// ── Rate limiting (Phase 0.4 / Phase 2.2) ─────────────────────────
 // Brute-force / credential-stuffing defense for the auth surface.
-// Tunable via env so tests can crank it up.
+// Phase 2.2: store moved to Redis so limits hold across multiple gateway replicas.
 const AUTH_RL_WINDOW_MS = Number(process.env.AUTH_RL_WINDOW_MS || 15 * 60 * 1000); // 15m
 const AUTH_RL_MAX       = Number(process.env.AUTH_RL_MAX       || 20);             // 20 / IP / window
+const REDIS_URL         = process.env.REDIS_URL || "redis://redis:6379";
+
+const redisClient = createClient({ url: REDIS_URL });
+redisClient.on("error", (e) => console.error("[rate-limit] redis error:", e.message));
+redisClient.connect()
+  .then(() => console.log("[rate-limit] Redis store connected"))
+  .catch((e) => console.error("[rate-limit] Redis connect failed (commands will queue):", e.message));
 
 const authLimiter = rateLimit({
   windowMs: AUTH_RL_WINDOW_MS,
   max:      AUTH_RL_MAX,
-  standardHeaders: true,    // RateLimit-* headers (RFC draft)
-  legacyHeaders:   false,   // disable old X-RateLimit-*
+  standardHeaders: true,
+  legacyHeaders:   false,
   message: { message: "Too many authentication attempts, please try again later." },
-  skip: (req) => req.method === "OPTIONS",   // never throttle CORS preflights
+  skip: (req) => req.method === "OPTIONS",
+  store: new RedisStore({
+    // node-redis v4 buffers commands until ready, so this is safe pre-connect.
+    sendCommand: (...args) => redisClient.sendCommand(args),
+    prefix: "rl:auth:",
+  }),
 });
 
 // Mount BEFORE the route handlers so it covers every /auth/* endpoint.

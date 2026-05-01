@@ -4,12 +4,24 @@ const ledgerRepo = require("./repositories/ledger.repository")
 const outboxRepo = require("./repositories/outbox.repository")
 const { randomUUID: uuidv4 } = require("crypto")
 const Money = require("/shared/money")
+const cache = require("/shared/cache")
 
 const TX_TOPIC = process.env.TX_EVENTS_TOPIC || "transaction.events"
+const BALANCE_TTL_SEC = Number(process.env.BALANCE_CACHE_TTL || 60)
+const balanceKey = (userId) => `balance:user:${userId}`
 
 // Phase 0.3 — daily transfer cap (rolling 24h window of DEBITs from source).
 // Tunable per environment via DAILY_TRANSFER_LIMIT_TND (default 10 000 TND).
 const DAILY_TRANSFER_LIMIT_TND = Number(process.env.DAILY_TRANSFER_LIMIT_TND || 10000)
+
+// Invalidate cached balance for a user on every committed mutation.
+// Uses both DEL (immediate) and pub/sub (cross-replica fan-out hook).
+async function invalidateBalanceFor(userId) {
+  if (!userId) return
+  const k = balanceKey(userId)
+  await cache.del(k)
+  await cache.publishInvalidate(k)
+}
 
 
 // Called by identity-service after creating a user with role "user"
@@ -27,16 +39,25 @@ exports.createAccount = async ({ userId, currency = "TND" }) => {
 
 // Called by customer frontend GET /balance
 exports.getBalance = async (userId) => {
+  // Read-through cache (Phase 2.1) — TTL bounds staleness even if a writer
+  // forgets to invalidate. Cache miss falls back to DB then warms the entry.
+  const cached = await cache.get(balanceKey(userId))
+  if (cached) {
+    try { return JSON.parse(cached) } catch (_) { /* corrupt entry — fall through */ }
+  }
+
   const account = await accountRepo.findByUserId(userId)
   if (!account) throw new Error("Account not found")
 
-  return {
+  const payload = {
     balance:       parseFloat(account.cached_balance),
     available:     parseFloat(account.cached_balance),  // no pending logic yet
     pending:       0.000,
     currency:      account.currency,
     accountNumber: account.id,
   }
+  await cache.setEx(balanceKey(userId), JSON.stringify(payload), BALANCE_TTL_SEC)
+  return payload
 }
 
 
@@ -107,6 +128,9 @@ exports.deposit = async (accountId, amount) => {
 
     await accountClient.query("COMMIT")
     await ledgerClient.query("COMMIT")
+
+    // Phase 2.1 — invalidate cached balance for the affected user.
+    invalidateBalanceFor(account.user_id).catch(() => {})
 
     return {
       transactionId,
@@ -282,7 +306,11 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
 
       await accountClient.query("COMMIT");
       await ledgerClient.query("COMMIT");
-      
+
+      // Phase 2.1 — invalidate balance cache for both ends of the transfer.
+      invalidateBalanceFor(sourceAccount.user_id).catch(() => {})
+      invalidateBalanceFor(destAccount.user_id).catch(() => {})
+
       console.log("✅ Transfer successful:", { transactionId, newSourceBalance, newDestBalance });
       
       return {
@@ -407,6 +435,9 @@ exports.withdraw = async (accountId, amount, note) => {
     // ✅ Commit both sides of distributed transaction
     await accountClient.query("COMMIT");
     await ledgerClient.query("COMMIT");
+
+    // Phase 2.1 — invalidate balance cache for the affected user.
+    invalidateBalanceFor(account.user_id).catch(() => {})
 
     return {
       transactionId,

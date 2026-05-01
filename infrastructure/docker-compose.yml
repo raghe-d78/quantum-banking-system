@@ -15,6 +15,18 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── Phase 2.1 — Redis (read cache + rate-limit store + pub/sub) ─
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # ── Phase 1.1 — Event backbone (Kafka, KRaft mode) ──────────────
   # Spec §11 mentioned Zookeeper, but Apache Kafka 3.7 ships KRaft as
   # the supported mode and Bitnami/Zookeeper images are no longer pulled
@@ -96,10 +108,14 @@ services:
       - KAFKA_BROKERS=kafka:9092
       - TX_EVENTS_TOPIC=transaction.events
       - OUTBOX_POLL_MS=500
+      - REDIS_URL=redis://redis:6379
+      - BALANCE_CACHE_TTL=60
     depends_on:
       cockroachdb:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # ── Phase 1.3 — Audit worker (Kafka consumer → audit_logs) ───────
@@ -146,6 +162,8 @@ services:
       - CORS_ORIGIN=http://localhost:5173,http://localhost:5174
       - IDENTITY_SERVICE_URL=http://identity-service:3001
       - ACCOUNT_SERVICE_URL=http://account-service:3002
+      - REDIS_URL=redis://redis:6379
     depends_on:
       - identity-service
       - account-service
+      - redis

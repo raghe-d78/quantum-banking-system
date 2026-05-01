@@ -12,6 +12,8 @@
     "dotenv": "^16.0.0",
     "express": "^4.19.0",
     "express-rate-limit": "^7.4.0",
+    "rate-limit-redis": "^4.2.0",
+    "redis": "^4.7.0",
     "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {

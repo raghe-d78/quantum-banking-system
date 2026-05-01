@@ -8,6 +8,56 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Phase 2: Redis read cache + distributed rate limiter
+
+### Added
+- **Redis** (`redis:7-alpine`) added to `infrastructure/docker-compose.yml`
+  with healthcheck (`redis-cli ping`). Both `account-service` and
+  `api-gateway` now `depends_on` it.
+- New shared module **`shared/cache.js`** — thin `node-redis` wrapper exposing
+  `connect / disconnect / get / setEx / del / publishInvalidate`. Maintains
+  two connections (commands + pub/sub, required by node-redis v4) and
+  auto-subscribes to a `cache.invalidate` channel so cross-replica DELs are
+  fanned out. All helpers degrade to no-ops on Redis outage so the data path
+  never breaks because of a cache failure.
+- New deps: `redis@^4.7.0` in `shared/`, `account-service/`, `api-gateway/`,
+  plus `rate-limit-redis@^4.2.0` in `api-gateway/`.
+
+### Changed
+- **`account.service.getBalance`** is now read-through:
+  - cache key `balance:user:{userId}`, TTL `BALANCE_CACHE_TTL` (default 60 s)
+  - on miss → DB → `SETEX` → return
+  - on hit → JSON parse → return (no DB hit)
+- After every committed mutation in `deposit / withdraw / transfer`, the
+  service `DEL`s and `PUBLISH`es invalidation for the affected user(s)
+  (transfer touches both source + destination users).
+- **Rate limiter** (`api-gateway/src/server.js`) now uses `rate-limit-redis`
+  with prefix `rl:auth:`, so the 20-req/IP/15-min auth cap holds across
+  multiple gateway replicas. node-redis v4 buffers commands until the
+  connection is ready, so no race at boot.
+- `account-service` env adds `REDIS_URL=redis://redis:6379` and
+  `BALANCE_CACHE_TTL=60`. `api-gateway` env adds `REDIS_URL`.
+- `account-service/src/server.js` connects/disconnects Redis on boot/shutdown
+  alongside Kafka.
+
+### Notes
+- TTL is a defence-in-depth: even if a future code path forgets to call
+  `invalidateBalanceFor`, stale data clears within 60 s.
+- Pub/sub channel `cache.invalidate` is wired even though we currently have
+  no in-process L1 cache. It's the hook for a future per-replica L1 layer
+  (e.g. `lru-cache` in front of Redis) without re-touching mutation sites.
+- Rate-limit keys are prefixed `rl:auth:` so other future limiters can share
+  the same Redis without collisions.
+
+### Tests
+- **Cache lifecycle** (`scripts/loadtest/phase2-check.ps1`):
+  - Cold read populates `balance:user:{uid}` with the DB value.
+  - Warm read returns cached payload; key unchanged.
+  - Deposit of 42 TND → key DELed → next read returns 42 and re-warms.
+- **Distributed rate-limit**: 5 bad logins increment `rl:auth:::ffff:<ip>`
+  to 7 in Redis (2 prior probes + 5 new), confirming all gateway replicas
+  would share the same counter.
+
 ## [Unreleased] — Phase 1: Kafka event backbone, transactional outbox, audit-service
 
 ### Added
