@@ -1,6 +1,6 @@
 // services/account-service/src/repositories/ledger.repository.js
 
-const { v4: uuidv4 } = require("uuid");
+const { randomUUID: uuidv4 } = require("crypto");
 const createPool = require("../../../shared/db");
 const pool = createPool("ledger_db"); // ✅ Your separate ledger database
 
@@ -54,4 +54,16 @@ async function insertEntry(client, entry) {
   }
 }
 
-module.exports = { pool, insertEntry };
+async function sumDebitsSince(client, accountId, sinceIso) {
+  const { rows } = await client.query(
+    `SELECT COALESCE(SUM(amount), 0)::STRING AS total
+       FROM ledger_entries
+      WHERE account_id = $1
+        AND type = 'DEBIT'
+        AND created_at >= $2`,
+    [accountId, sinceIso]
+  );
+  return rows[0]?.total ?? "0";
+}
+
+module.exports = { pool, insertEntry, sumDebitsSince };

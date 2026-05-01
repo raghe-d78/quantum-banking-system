@@ -58,7 +58,7 @@ describe("GET /balance", () => {
   test("returns balance for authenticated user", async () => {
     accountRepo.findByUserId.mockResolvedValue({
       id: "acc-uuid", user_id: "test-uuid",
-      balance: "1500.000", currency: "TND",
+      cached_balance: "1500.000", currency: "TND",
     })
 
     const res = await request(app)

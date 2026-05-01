@@ -1,8 +1,12 @@
 // services/account-service/src/account.service.js
-// const accountRepo = require("./account.repository")
-const accountRepo = require("./repositories/account.repository")
+const accountRepo = require("./account.repository")
 const ledgerRepo = require("./repositories/ledger.repository")
-const { v4: uuidv4 } = require("uuid")
+const { randomUUID: uuidv4 } = require("crypto")
+const Money = require("/shared/money")
+
+// Phase 0.3 — daily transfer cap (rolling 24h window of DEBITs from source).
+// Tunable per environment via DAILY_TRANSFER_LIMIT_TND (default 10 000 TND).
+const DAILY_TRANSFER_LIMIT_TND = Number(process.env.DAILY_TRANSFER_LIMIT_TND || 10000)
 
 
 // Called by identity-service after creating a user with role "user"
@@ -55,25 +59,33 @@ exports.deposit = async (accountId, amount) => {
 
     if (!account) throw new Error("Account not found")
 
-    const current = Number(account.cached_balance)
-    const newBalance = current + Number(amount)
+    // 💱 Decimal-safe arithmetic via shared/money.js
+    const currency       = account.currency
+    const currentMoney   = new Money(account.cached_balance, currency)
+    const depositMoney   = new Money(amount, currency)
+    const newBalanceStr  = currentMoney.add(depositMoney).toFixed(4)
+    const newBalanceNum  = Number(newBalanceStr)
 
     const transactionId = uuidv4()
+    const timestamp     = new Date().toISOString()
 
     // 📜 Ledger entry
     await ledgerRepo.insertEntry(ledgerClient, {
+      id: uuidv4(),
       transactionId,
       accountId,
       type: "CREDIT",
-      amount,
-      balance: newBalance
+      amount: Number(depositMoney.toFixed(4)),
+      balance_snapshot: newBalanceNum,
+      reference: `Deposit ${new Date().toLocaleDateString()}`,
+      created_at: timestamp,
     })
 
     // 💰 Update balance
     await accountRepo.updateBalance(
       accountClient,
       accountId,
-      newBalance
+      newBalanceStr
     )
 
     await accountClient.query("COMMIT")
@@ -81,7 +93,7 @@ exports.deposit = async (accountId, amount) => {
 
     return {
       transactionId,
-      balance: newBalance
+      balance: newBalanceNum
     }
 
   } catch (err) {
@@ -155,35 +167,54 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
         throw new Error(`Currency mismatch: ${sourceAccount.currency} ≠ ${destAccount.currency}`);
       }
       
-      const sourceBalance = Number(sourceAccount.cached_balance);
-      if (sourceBalance < amount) {
-        throw new Error(`Insufficient funds: ${sourceBalance} < ${amount}`);
+      // 💱 Decimal-safe arithmetic — Money.subtract throws on insufficient funds
+      const currency      = sourceAccount.currency;
+      const sourceMoney   = new Money(sourceAccount.cached_balance, currency);
+      const destMoney     = new Money(destAccount.cached_balance,   currency);
+      const transferMoney = new Money(amount, currency);
+
+      // 🛑 Phase 0.3 — Daily transfer cap (rolling 24h DEBITs from source).
+      // Computed *inside* the locked transaction to avoid race conditions.
+      // Only enforced for TND accounts; cross-currency limits TBD.
+      if (currency === "TND" && DAILY_TRANSFER_LIMIT_TND > 0) {
+        const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+        const usedStr = await ledgerRepo.sumDebitsSince(ledgerClient, sourceAccountId, since);
+        const used    = new Money(usedStr, "TND");
+        const limit   = new Money(DAILY_TRANSFER_LIMIT_TND, "TND");
+        const wouldBe = used.add(transferMoney);
+        if (wouldBe.isGreaterThan(limit)) {
+          const err = new Error(
+            `Daily transfer limit exceeded: ${wouldBe.toFixed(4)} TND > ${limit.toFixed(4)} TND ` +
+            `(already used ${used.toFixed(4)} in last 24h)`
+          );
+          err.code = "DAILY_LIMIT_EXCEEDED";
+          throw err;
+        }
       }
-      
-      const newSourceBalance = sourceBalance - Number(amount);
-      const newDestBalance = Number(destAccount.cached_balance) + Number(amount);
-      
-      console.log("💰 Calculated balances:", {
-        sourceBalance,
-        newSourceBalance,
-        destBalance: Number(destAccount.cached_balance),
-        newDestBalance,
-        amount: Number(amount),
-      });
+
+      let newSourceMoney;
+      try {
+        newSourceMoney = sourceMoney.subtract(transferMoney);
+      } catch (e) {
+        throw new Error(`Insufficient funds: ${sourceMoney.toFixed(4)} < ${transferMoney.toFixed(4)}`);
+      }
+      const newDestMoney = destMoney.add(transferMoney);
+
+      const newSourceBalance = Number(newSourceMoney.toFixed(4));
+      const newDestBalance   = Number(newDestMoney.toFixed(4));
+      const sourceBalance    = Number(sourceMoney.toFixed(4));
       
       const transactionId = uuidv4();
       const timestamp = new Date().toISOString();
       
-      // 🔥 CRITICAL: Log what we're about to insert
       const debitEntry = {
         id: uuidv4(),
         transactionId,
         accountId: sourceAccountId,
         type: "DEBIT",
-        amount: Number(amount),
-        balance_snapshot: newSourceBalance, // ← This MUST be a number
+        amount: Number(transferMoney.toFixed(4)),
+        balance_snapshot: newSourceBalance,
         reference: reference || `Transfer to ${destinationAccountId}`,
-        
         created_at: timestamp,
       };
       
@@ -192,45 +223,20 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
         transactionId,
         accountId: destinationAccountId,
         type: "CREDIT",
-        amount: Number(amount),
-        balance_snapshot: newDestBalance, // ← This MUST be a number
+        amount: Number(transferMoney.toFixed(4)),
+        balance_snapshot: newDestBalance,
         reference: reference || `Transfer from ${sourceAccountId}`,
-        
         created_at: timestamp,
       };
-      
-      console.log("📝 DEBIT entry to insert:", {
-        ...debitEntry,
-        balance_snapshot_type: typeof debitEntry.balance_snapshot,
-        balance_snapshot_is_nan: isNaN(debitEntry.balance_snapshot),
-        balance_snapshot_is_null: debitEntry.balance_snapshot === null,
-        balance_snapshot_is_undefined: debitEntry.balance_snapshot === undefined,
-      });
-      
-      console.log("📝 CREDIT entry to insert:", {
-        ...creditEntry,
-        balance_snapshot_type: typeof creditEntry.balance_snapshot,
-        balance_snapshot_is_nan: isNaN(creditEntry.balance_snapshot),
-        balance_snapshot_is_null: creditEntry.balance_snapshot === null,
-        balance_snapshot_is_undefined: creditEntry.balance_snapshot === undefined,
-      });
-      
-      // 🔥 VALIDATE before inserting
-      if (debitEntry.balance_snapshot === null || debitEntry.balance_snapshot === undefined || isNaN(debitEntry.balance_snapshot)) {
-        throw new Error(`DEBIT balance_snapshot is invalid: ${debitEntry.balance_snapshot} (type: ${typeof debitEntry.balance_snapshot})`);
-      }
-      if (creditEntry.balance_snapshot === null || creditEntry.balance_snapshot === undefined || isNaN(creditEntry.balance_snapshot)) {
-        throw new Error(`CREDIT balance_snapshot is invalid: ${creditEntry.balance_snapshot} (type: ${typeof creditEntry.balance_snapshot})`);
-      }
       
       // Insert ledger entries
       await ledgerRepo.insertEntry(ledgerClient, debitEntry);
       await ledgerRepo.insertEntry(ledgerClient, creditEntry);
       
-      // Update balances
+      // Update balances (persist as fixed-precision strings)
       await Promise.all([
-        accountRepo.updateBalance(accountClient, sourceAccountId, newSourceBalance),
-        accountRepo.updateBalance(accountClient, destinationAccountId, newDestBalance),
+        accountRepo.updateBalance(accountClient, sourceAccountId, newSourceMoney.toFixed(4)),
+        accountRepo.updateBalance(accountClient, destinationAccountId, newDestMoney.toFixed(4)),
       ]);
       
       await accountClient.query("COMMIT");
@@ -247,11 +253,11 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
         },
         destination: {
           accountId: destinationAccountId,
-          previousBalance: Number(destAccount.cached_balance),
+          previousBalance: Number(destMoney.toFixed(4)),
           newBalance: newDestBalance,
         },
-        amount,
-        currency: sourceAccount.currency,
+        amount: Number(transferMoney.toFixed(4)),
+        currency,
         reference,
         timestamp,
       };
@@ -310,49 +316,52 @@ exports.withdraw = async (accountId, amount, note) => {
       throw new Error("Account not found");
     }
 
-    // 🔐 Check sufficient funds
-    const current = Number(account.cached_balance);
-    if (current < amount) {
-      throw new Error(`Insufficient funds: ${current} < ${amount}`);
-    }
+    // 💱 Decimal-safe withdraw — Money.subtract throws on insufficient funds
+    const currency        = account.currency;
+    const currentMoney    = new Money(account.cached_balance, currency);
+    const withdrawMoney   = new Money(amount, currency);
 
-    // 💰 Calculate new balance
-    const newBalance = current - Number(amount);
-    const transactionId = uuidv4();
-    const timestamp = new Date().toISOString();
+    let newMoney;
+    try {
+      newMoney = currentMoney.subtract(withdrawMoney);
+    } catch (e) {
+      throw new Error(`Insufficient funds: ${currentMoney.toFixed(4)} < ${withdrawMoney.toFixed(4)}`);
+    }
+    const newBalance      = Number(newMoney.toFixed(4));
+    const current         = Number(currentMoney.toFixed(4));
+    const transactionId   = uuidv4();
+    const timestamp       = new Date().toISOString();
 
     // 📜 Insert DEBIT ledger entry
-    // ✅ Match ledger_entries schema: id, transaction_id, account_id, type, amount, balance_snapshot, reference, created_at
     await ledgerRepo.insertEntry(ledgerClient, {
-      id: uuidv4(),                    // ✅ Unique ledger entry ID
-      transactionId,                   // ✅ Links to logical transaction
-      accountId: account.id,           // ✅ Account this entry belongs to
-      type: "DEBIT",                   // ✅ Withdrawal = debit from account
-      amount: Number(amount),          // ✅ Ensure number type
-      balance_snapshot: newBalance,    // ✅ CRITICAL: Must match schema column name
-      reference: note || `Withdrawal ${new Date().toLocaleDateString()}`, // ✅ 'note' → 'reference'
-      created_at: timestamp,           // ✅ Explicit timestamp
+      id: uuidv4(),
+      transactionId,
+      accountId: account.id,
+      type: "DEBIT",
+      amount: Number(withdrawMoney.toFixed(4)),
+      balance_snapshot: newBalance,
+      reference: note || `Withdrawal ${new Date().toLocaleDateString()}`,
+      created_at: timestamp,
     });
 
     // 💰 Update account balance
     await accountRepo.updateBalance(
       accountClient,
       account.id,
-      newBalance
+      newMoney.toFixed(4)
     );
 
     // ✅ Commit both sides of distributed transaction
     await accountClient.query("COMMIT");
     await ledgerClient.query("COMMIT");
 
-    // 🎉 Return result
     return {
       transactionId,
       accountId: account.id,
       previousBalance: current,
       newBalance,
-      amount: Number(amount),
-      currency: account.currency,
+      amount: Number(withdrawMoney.toFixed(4)),
+      currency,
       reference: note,
       timestamp,
     };

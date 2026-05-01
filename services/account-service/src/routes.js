@@ -3,7 +3,7 @@ const express     = require("express")
 const router      = express.Router()
 const axios = require("axios")
 const accountService = require("./account.service")
-const accountRepo = require("./repositories/account.repository")
+const accountRepo = require("./account.repository")
 const { authenticate, requireAdmin, requireStaff } = require("./middleware/auth.middleware")
 const txService      = require("./transaction.service");
 const exportService  = require("./Export.service");
@@ -120,7 +120,8 @@ router.post("/transfer", authenticate, async (req, res) => {
     console.error("Transfer error:", err.message);
     
     // Map errors to appropriate HTTP status codes
-    const status = 
+    const status =
+      err.code === "DAILY_LIMIT_EXCEEDED" ? 429 :
       err.message.includes("Insufficient funds") ? 400 :
       err.message.includes("not found") ? 404 :
       err.message.includes("Currency mismatch") ? 400 :
