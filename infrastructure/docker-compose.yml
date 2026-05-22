@@ -213,8 +213,8 @@ services:
   # transaction.scored, persists Critical/High verdicts to fraud_db.
   fraud-service:
     build:
-      context: ..
-      dockerfile: services/fraud-service/Dockerfile
+      context: ../services/fraud-service
+      dockerfile: Dockerfile
     ports:
       - "3007:3007"
     environment:
@@ -235,3 +235,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
