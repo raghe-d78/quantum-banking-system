@@ -30,6 +30,7 @@ const RegisterForm = () => {
       setFormData({ username: "", email: "", name: "", password: "", role: "customer" });
       setTimeout(() => setSuccess(false), 4000);
     } catch (err) {
+      setSuccess(false);
       setError(err.response?.data?.message ?? "Failed to create user.");
     } finally {
       setLoading(false);
@@ -45,6 +46,15 @@ const RegisterForm = () => {
     fontSize: 11, color: "#888", letterSpacing: 1,
     textTransform: "uppercase", fontWeight: 600,
   };
+
+  const generatePassword = () => {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{};:,.<>?";
+  const password = Array.from({ length: 12 }, () =>
+    chars[Math.floor(Math.random() * chars.length)]
+  ).join("");
+  setFormData((prev) => ({ ...prev, password }));
+};
 
   if (success) return (
     <div style={{ background: "#fff", borderRadius: 16, padding: 48, textAlign: "center", boxShadow: "0 2px 12px rgba(0,0,0,0.06)", maxWidth: 760, margin: "0 auto" }}>
@@ -99,11 +109,49 @@ const RegisterForm = () => {
               placeholder="client@email.com" />
           </div>
 
+<div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+  <label style={labelStyle}>Password</label>
+  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+    <input
+      style={{ ...inputStyle, flex: 1, margin: 0 }}
+      type="password"
+      name="password"
+      value={formData.password}
+      onChange={handleChange}
+      placeholder="••••••••"
+    />
+    <button
+      type="button"
+      onClick={generatePassword}
+      style={{
+        padding: "11px 14px",
+        borderRadius: 10,
+        border: "1.5px solid #e8e2d8",
+        background: "#fff",
+        color: "#0a1628",
+        cursor: "pointer",
+        fontSize: 12,
+        fontWeight: 600,
+        minWidth: 110,
+      }}
+    >
+      Generate
+    </button>
+  </div>
+</div>
+          
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <label style={labelStyle}>Password</label>
-            <input style={inputStyle} type="password" name="password"
-              value={formData.password} onChange={handleChange}
-              placeholder="••••••••" />
+            <label style={labelStyle}>Address</label>
+            <input style={inputStyle} type="text" name="address"
+              value={formData.address} onChange={handleChange}
+              placeholder="e.g. 123 Main Street" />
+          </div>
+          
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={labelStyle}>phone number</label>
+            <input style={inputStyle} type="text" name="phone"
+              value={formData.phone} onChange={handleChange}
+              placeholder="e.g. 23 456 790" />
           </div>
 
           {/* Role selector */}
@@ -113,7 +161,7 @@ const RegisterForm = () => {
               {[
                 { value: "customer",  label: "Customer",  desc: "Bank account created automatically", icon: "◈" },
                 { value: "employee",  label: "Employee",  desc: "Bank staff — access to staff portal", icon: "◉" },
-                { value: "admin",     label: "Admin",     desc: "Full access to admin dashboard",      icon: "✦" },
+                // { value: "admin",     label: "Admin",     desc: "Full access to admin dashboard",      icon: "✦" },
               ].map((r) => (
                 <button key={r.value} type="button"
                   onClick={() => setFormData({ ...formData, role: r.value })}

@@ -3,7 +3,7 @@ gunicorn==22.0.0
 numpy==1.26.4
 scikit-learn==1.5.2
 qiskit==1.2.4
-qiskit-aer-gpu==0.14.2
+qiskit-aer==0.15.1
 qiskit-machine-learning==0.8.2
 confluent-kafka==2.5.3
 psycopg2-binary==2.9.9

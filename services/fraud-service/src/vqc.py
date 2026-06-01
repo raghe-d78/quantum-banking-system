@@ -31,47 +31,26 @@ from .dataset  import generate
 from .features import FEATURE_NAMES, FEATURE_SCHEMA_VERSION
 
 MODEL_VERSION  = "vqc-zz-realamp-v1"
-QUBITS         = 8
-TRAIN_SUBSET   = 8800        # stratified samples
-COBYLA_MAXITER = 500
+QUBITS         = 4
+TRAIN_SUBSET   = 300        # stratified samples
+COBYLA_MAXITER = 60
 
 
 # ---------- core math (lazy-imported qiskit so unit tests stay light) ---------
 
 def _build_vqc(seed: int):
-    from qiskit_machine_learning.algorithms         import VQC
+    from qiskit_machine_learning.algorithms        import VQC
     try:
         from qiskit_machine_learning.optimizers    import COBYLA
     except ImportError:  # older 0.7.x layout
         from qiskit_algorithms.optimizers          import COBYLA
     from qiskit.circuit.library                    import ZZFeatureMap, RealAmplitudes
-    
-    # --- GPU Upgrade Modifications ---
-    from qiskit_aer import AerSimulator
-    from qiskit_aer.primitives import Sampler as AerSampler
-
-    # 1. Instantiate the simulator explicitly targeting the GPU backend
-    simulator = AerSimulator(method="statevector", device="GPU") [cite: 104, 107]
-
-    backend = simulator.available_devices()
-    print(f"[fraud-service] AerSimulator initialized with backend: {backend}")
-    
-    
-    # 2. Add a diagnostic log so you can track successful setup in your docker logs
-    try:
-        devices = simulator.available_devices() [cite: 111]
-        print(f"[fraud-service] Aer available devices: {devices}") [cite: 112]
-    except Exception:
-        print("[fraud-service] Could not query Aer devices.")
-
-    # 3. Use AerSampler backed by the GPU simulator instead of the basic CPU Sampler()
-    sampler = AerSampler(backend_options={}, transpile_options={}, run_options={}, bound_sampler=simulator)
-    # ----------------------------------
+    from qiskit.primitives                         import Sampler
 
     fmap   = ZZFeatureMap(feature_dimension=QUBITS, reps=1, entanglement="linear")
     ansatz = RealAmplitudes(num_qubits=QUBITS, reps=1)
     return VQC(
-        sampler=sampler,
+        sampler=Sampler(),
         feature_map=fmap,
         ansatz=ansatz,
         optimizer=COBYLA(maxiter=COBYLA_MAXITER),
