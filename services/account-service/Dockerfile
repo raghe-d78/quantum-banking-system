@@ -7,5 +7,6 @@ RUN npm install
 
 COPY services/account-service ./
 COPY shared ../shared
+RUN cd ../shared && npm install --omit=dev
 
 CMD ["node", "src/server.js"]

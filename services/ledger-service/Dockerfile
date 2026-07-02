@@ -7,6 +7,7 @@ RUN npm install
 
 COPY services/ledger-service ./services/ledger-service
 COPY shared ./shared
+RUN cd shared && npm install --omit=dev
 
 WORKDIR /app/services/ledger-service
 

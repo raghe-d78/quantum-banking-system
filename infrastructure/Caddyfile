@@ -1,0 +1,48 @@
+# ──────────────────────────────────────────────────────────────────
+# Caddyfile — Quantum Banking System (Phase 5.2)
+#
+# Caddy automatically:
+#   • obtains + renews Let's Encrypt certificates for real domains
+#   • generates a local CA-signed cert when domain == localhost
+#   • forces HTTPS (HTTP → HTTPS redirect)
+#   • adds HSTS, sane TLS defaults, HTTP/2 and HTTP/3
+# ──────────────────────────────────────────────────────────────────
+
+{
+	email {$CADDY_EMAIL}
+	# Uncomment for staging certs while testing real domains:
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$CADDY_DOMAIN} {
+	encode gzip zstd
+
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options    "nosniff"
+		X-Frame-Options           "DENY"
+		Referrer-Policy           "strict-origin-when-cross-origin"
+		# Hide internal server signature
+		-Server
+	}
+
+	# Reverse-proxy everything to api-gateway:3000 inside the compose
+	# network. All micro-services sit behind it, so a single upstream
+	# is enough.
+	reverse_proxy api-gateway:3000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	# Health check endpoint (bypasses upstream)
+	handle /caddy-health {
+		respond "ok" 200
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

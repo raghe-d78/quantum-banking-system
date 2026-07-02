@@ -15,6 +15,63 @@ services:
       timeout: 5s
       retries: 10
 
+  # ── Phase 2.1 — Redis (read cache + rate-limit store + pub/sub) ─
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Phase 1.1 — Event backbone (Kafka, KRaft mode) ──────────────
+  # Spec §11 mentioned Zookeeper, but Apache Kafka 3.7 ships KRaft as
+  # the supported mode and Bitnami/Zookeeper images are no longer pulled
+  # cleanly behind some networks. KRaft is functionally equivalent for
+  # the spec's "Zone 2 event-driven bus" goal — single broker, single
+  # controller, auto-creation of topics enabled.
+  kafka:
+    image: apache/kafka:3.7.0
+    ports:
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9094,EXTERNAL://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092,EXTERNAL://localhost:9093"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9094"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_LOG_RETENTION_HOURS: 168                # 7d, per ROADMAP
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+
+  # One-shot job that explicitly creates the canonical topics with the
+  # right partition/retention settings.
+  kafka-init:
+    image: apache/kafka:3.7.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash","-c"]
+    command:
+      - "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.events --partitions 3 --replication-factor 1 --config retention.ms=604800000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic audit.logs --partitions 1 --replication-factor 1 --config retention.ms=2592000000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.scored --partitions 3 --replication-factor 1 --config retention.ms=604800000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.cancelled --partitions 3 --replication-factor 1 --config retention.ms=2592000000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list"
+    restart: "no"
+
   identity-service:
     build:
       context: ..
@@ -23,10 +80,12 @@ services:
       - "3001:3001"
     environment:
       - PORT=3001
-      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
-      - JWT_EXPIRES=24h
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-banque_refresh_secret_2026}
+      - JWT_EXPIRES=${JWT_EXPIRES:-24h}
+      - JWT_REFRESH_EXPIRES=${JWT_REFRESH_EXPIRES:-7d}
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=identity_db
       - ACCOUNT_SERVICE_URL=http://account-service:3002
     depends_on:
@@ -41,13 +100,45 @@ services:
       - "3002:3002"
     environment:
       - PORT=3002
-      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=account_db
+      - DAILY_TRANSFER_LIMIT_TND=${DAILY_TRANSFER_LIMIT_TND:-10000}
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
+      - TX_EVENTS_TOPIC=transaction.events
+      - OUTBOX_POLL_MS=500
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - BALANCE_CACHE_TTL=${BALANCE_CACHE_TTL:-60}
     depends_on:
       cockroachdb:
         condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Phase 1.3 — Audit worker (Kafka consumer → audit_logs) ───────
+  audit-service:
+    build:
+      context: ..
+      dockerfile: services/audit-service/Dockerfile
+    ports:
+      - "3004:3004"
+    environment:
+      - PORT=3004
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
+      - DB_NAME=audit_db
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
+      - TX_EVENTS_TOPIC=transaction.events
+      - AUDIT_GROUP_ID=audit-workers
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+
   ledger-service:
     build:
       context: ..
@@ -56,8 +147,8 @@ services:
       - "3003:3003"
     environment:
       - PORT=3003
-      - DB_HOST=cockroachdb
-      - DB_PORT=26257
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
       - DB_NAME=ledger_db
     depends_on:
       cockroachdb:
@@ -67,10 +158,80 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - JWT_SECRET=banque_super_secret_2026        # ← même valeur partout
-      - CORS_ORIGIN=http://localhost:5173,http://localhost:5174
+      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
+      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173,http://localhost:5174}
       - IDENTITY_SERVICE_URL=http://identity-service:3001
       - ACCOUNT_SERVICE_URL=http://account-service:3002
+      - QUANTUM_SERVICE_URL=http://quantum-service:3005
+      - KMS_SERVICE_URL=http://kms-service:3006
+      - FRAUD_SERVICE_URL=http://fraud-service:3007
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
     depends_on:
       - identity-service
       - account-service
+      - redis
+
+  # ── Phase 3 — Quantum compute (QRNG + BB84 + circuit viz) ───────
+  # Python/Qiskit service. Defaults to local Aer simulator (free, instant).
+  # IBM Quantum hardware can be enabled by setting QUANTUM_BACKEND=ibm
+  # AND providing IBM_QUANTUM_TOKEN + IBM_QUANTUM_CRN via .env (gitignored).
+  quantum-service:
+    build:
+      context: ..
+      dockerfile: services/quantum-service/Dockerfile
+    ports:
+      - "3005:3005"
+    environment:
+      - PORT=3005
+      - QUANTUM_BACKEND=${QUANTUM_BACKEND:-simulator}
+      - QRNG_BUFFER_BYTES=${QRNG_BUFFER_BYTES:-4096}
+      - IBM_QUANTUM_TOKEN=${IBM_QUANTUM_TOKEN:-}
+      - IBM_QUANTUM_CRN=${IBM_QUANTUM_CRN:-}
+
+  # ── Phase 3.4 — Key Management Service (BB84-derived AES-256-GCM) ─
+  kms-service:
+    build:
+      context: ..
+      dockerfile: services/kms-service/Dockerfile
+    ports:
+      - "3006:3006"
+    environment:
+      - PORT=3006
+      - QUANTUM_SERVICE_URL=http://quantum-service:3005
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - KEY_TTL_SEC=${KEY_TTL_SEC:-300}
+      - KEY_ROUNDS=${KEY_ROUNDS:-3}
+      - KEY_QUBITS=${KEY_QUBITS:-1024}
+    depends_on:
+      redis:
+        condition: service_healthy
+      quantum-service:
+        condition: service_started
+
+  # ── Phase 4 — Fraud detection (classical baseline + quantum VQC) ─
+  # Consumes transaction.events, scores with both models, publishes
+  # transaction.scored, persists Critical/High verdicts to fraud_db.
+  fraud-service:
+    build:
+      context: ..
+      dockerfile: services/fraud-service/Dockerfile
+    ports:
+      - "3007:3007"
+    environment:
+      - PORT=3007
+      - DB_HOST=${DB_HOST:-cockroachdb}
+      - DB_PORT=${DB_PORT:-26257}
+      - DB_NAME=fraud_db
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
+      - TX_EVENTS_TOPIC=transaction.events
+      - TX_SCORED_TOPIC=transaction.scored
+      - FRAUD_GROUP_ID=fraud-workers
+      - FRAUD_MODELS_DIR=/app/models
+    depends_on:
+      cockroachdb:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy

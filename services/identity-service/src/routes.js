@@ -5,6 +5,16 @@ const authService = require("./auth.service");
 const userService = require("./user.service");
 const { authenticate, requireAdmin, requireStaff } = require("./middleware/auth.middleware");
 
+// Legacy unified login — kept for backwards compatibility (no role gate).
+// New clients should use /auth/staff/login or /auth/customer/login.
+router.post("/auth/login", async (req, res) => {
+  try {
+    res.json(await authService.login(req.body))
+  } catch (err) {
+    res.status(401).json({ message: err.message })
+  }
+})
+
 router.post("/auth/staff/login", async (req, res) => {
   try {
     const result = await authService.login(req.body)
@@ -30,6 +40,26 @@ router.post("/auth/customer/login", async (req, res) => {
   } catch (err) {
     console.error("Error in /auth/login:", err)
     res.status(401).json({ message: err.message })
+  }
+})
+
+// REFRESH — exchange refresh token for a new access+refresh pair
+router.post("/auth/refresh", async (req, res) => {
+  try {
+    const result = await authService.refresh(req.body.refreshToken)
+    res.json(result)
+  } catch (err) {
+    res.status(401).json({ message: err.message })
+  }
+})
+
+// LOGOUT — revoke the supplied refresh token (idempotent)
+router.post("/auth/logout", async (req, res) => {
+  try {
+    await authService.logout(req.body.refreshToken)
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ message: err.message })
   }
 })
 
@@ -84,6 +114,30 @@ router.get("/admin/users", authenticate, requireAdmin, async (req, res) => {
   try {
     const users = await userService.listUsers(req.query);
     res.json({ users, count: users.length });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// GET /admin/users/lookup/:value — find user by id, username, or email.
+// Used by account-service to resolve staff lookups.
+router.get("/admin/users/lookup/:value", authenticate, requireStaff, async (req, res) => {
+  try {
+    const { value } = req.params;
+    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+    let user = null;
+    if (isUuid) {
+      try { user = await userService.getUser(value); } catch (_) { user = null; }
+    }
+    if (!user) {
+      const userRepo = require("./user.repository");
+      const found =
+        (await userRepo.findByUsername(value)) ||
+        (await userRepo.findByEmail(value));
+      if (found) user = await userService.getUser(found.id);
+    }
+    if (!user) return res.status(404).json({ message: "User not found" });
+    res.json({ user });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

@@ -9,6 +9,13 @@ jest.mock("../../src/user.repository", () => ({
   create:         jest.fn(),
   findById:       jest.fn(),
 }))
+// Phase 0.1: login now persists a refresh token; mock that repo too.
+jest.mock("../../src/refreshToken.repository", () => ({
+  insert:           jest.fn().mockResolvedValue(undefined),
+  findActive:       jest.fn(),
+  revoke:           jest.fn().mockResolvedValue(undefined),
+  revokeAllForUser: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock("axios", () => ({
   post: jest.fn().mockResolvedValue({ data: { account: {} } }),
 }))

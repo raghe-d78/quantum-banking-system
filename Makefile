@@ -46,3 +46,8 @@ test-identity:
 
 account:
 	docker compose -f $(COMPOSE_FILE) up account-service
+
+# Phase 1.4 — concurrent-deposits load test (Node fallback; k6 variant lives next to it)
+loadtest:
+	@echo "Usage: ACCOUNT_ID=<uuid> make loadtest [N=100]"
+	node scripts/loadtest/concurrent-deposits.js $(N)
