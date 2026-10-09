@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from .features import build_features, FEATURE_SCHEMA_VERSION
 from .risk     import decide
-from .store    import get_redis, insert_score, insert_alert, resolve_alerts
+from .store    import get_redis, insert_score, insert_alert, resolve_alerts, get_document_features
 
 log = logging.getLogger("fraud.consumer")
 
@@ -65,7 +65,11 @@ class FraudWorker(threading.Thread):
 
     def score_event(self, event: dict) -> dict:
         redis_client = get_redis()
-        feats, diag  = build_features(redis_client, event)
+        # CV extension: document features travel by reference (documentId) or inline (document).
+        cv = event.get("document") if isinstance(event.get("document"), dict) else None
+        if cv is None and event.get("documentId"):
+            cv = get_document_features(event["documentId"])
+        feats, diag  = build_features(redis_client, event, cv)
         c_score      = self.baseline.predict_proba(feats)
         q_score      = self.vqc.predict_proba(feats)
         verdict      = decide(c_score, q_score, self.baseline.metadata["modelVersion"], self.vqc.metadata["modelVersion"])
@@ -76,6 +80,7 @@ class FraudWorker(threading.Thread):
             schema_version=FEATURE_SCHEMA_VERSION,
         )
         scored["_features"] = {n: float(v) for n, v in zip(diag["feature_names"], feats)}
+        scored["documentId"] = event.get("documentId")
         scored["_diagnostics"] = {k: v for k, v in diag.items() if k != "feature_names"}
         return scored
 

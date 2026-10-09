@@ -20,9 +20,10 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score
 
-from .baseline import load_or_train as load_baseline
+from .baseline import load_or_train as load_baseline, train as train_baseline_on
 from .vqc      import load_or_train as load_vqc
 from .dataset  import generate as generate_dataset
+from .features import TX_DIM, FEATURE_NAMES
 
 
 def _scores(bundle, X):
@@ -39,6 +40,35 @@ def _latency(bundle, X, n_samples: int = 50):
         bundle.predict_proba(row)
         times.append(time.perf_counter() - t0)
     return float(np.median(times) * 1000.0)
+
+
+def _metrics(y, p):
+    yhat = (p >= 0.5).astype(int)
+    return {"precision": float(precision_score(y, yhat, zero_division=0)), "recall": float(recall_score(y, yhat, zero_division=0)),
+            "f1": float(f1_score(y, yhat, zero_division=0)), "rocAuc": float(roc_auc_score(y, p))}
+
+
+def ablation_classical(seed: int = 999) -> dict:
+    """CV extension §17: ROC-AUC of the classical model WITH vs WITHOUT the document features.
+    Both variants are trained on the same split; 'without' sees only the 7 transaction columns."""
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    X, y, _ = generate_dataset(seed=seed)
+    Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.2, stratify=y, random_state=seed)
+    out = {}
+    for name, cols in (("with_cv", slice(None)), ("without_cv", slice(0, TX_DIM))):
+        sc = StandardScaler().fit(Xtr[:, cols])
+        clf = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=seed).fit(sc.transform(Xtr[:, cols]), ytr)
+        out[name] = _metrics(yte, clf.predict_proba(sc.transform(Xte[:, cols]))[:, 1])
+    # Documents only: how much signal the 9 CV columns carry on their own (rows that have a document).
+    has = Xte[:, TX_DIM] == 1.0
+    if has.sum() > 50 and len(set(yte[has])) == 2:
+        sc = StandardScaler().fit(Xtr[Xtr[:, TX_DIM] == 1.0][:, TX_DIM + 1:])
+        clf = LogisticRegression(class_weight="balanced", max_iter=1000, random_state=seed).fit(
+            sc.transform(Xtr[Xtr[:, TX_DIM] == 1.0][:, TX_DIM + 1:]), ytr[Xtr[:, TX_DIM] == 1.0])
+        out["cv_only_on_documented_rows"] = _metrics(yte[has], clf.predict_proba(sc.transform(Xte[has][:, TX_DIM + 1:]))[:, 1])
+    out["featureNames"] = FEATURE_NAMES
+    return out
 
 
 def main():
@@ -84,6 +114,8 @@ def main():
             "latencyMsP50": round(q_p50, 3),
         },
     }
+    print("running classical ablation (with / without document features) …")
+    report["ablation"] = ablation_classical(seed=999)
     print("---REPORT-JSON---")
     print(json.dumps(report, indent=2))
 

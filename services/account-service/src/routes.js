@@ -87,7 +87,13 @@ router.get("/payees", authenticate, wrap(async (req, res) => {
 router.post("/transactions", authenticate, wrap(async (req, res) => {
   const key = req.get("Idempotency-Key") || null
   const result = await accountService.createTransaction(req.user, req.body || {}, key)
-  res.status(result.replayed ? 200 : 201).json({ success: true, data: result })
+  res.status(result.replayed ? 200 : result.held ? 202 : 201).json({ success: true, data: result })
+}))
+
+// My held (suspended) transactions
+router.get("/transactions/holds", authenticate, wrap(async (req, res) => {
+  const holds = await accountService.listHolds({ status: req.query.status || null, userId: req.user.userId, limit: req.query.limit })
+  res.json({ holds, count: holds.length })
 }))
 
 // ── transactions (read side) ──────────────────────────────────────
@@ -152,6 +158,18 @@ router.post("/admin/transactions/:id/cancel", authenticate, requireStaff, wrap(a
     reason: req.body?.reason, cancelledBy: req.user.userId,
   })
   res.status(200).json(result)
+}))
+
+// ── staff: document-risk holds ────────────────────────────────────
+router.get("/admin/holds", authenticate, requireStaff, wrap(async (req, res) => {
+  const holds = await accountService.listHolds({ status: req.query.status === "all" ? null : (req.query.status || "PENDING_REVIEW"), limit: req.query.limit })
+  res.json({ holds, count: holds.length })
+}))
+router.post("/admin/holds/:id/release", authenticate, requireStaff, wrap(async (req, res) => {
+  res.json(await accountService.decideHold(req.params.id, { action: "RELEASE", actor: req.user, note: req.body?.note }))
+}))
+router.post("/admin/holds/:id/reject", authenticate, requireStaff, wrap(async (req, res) => {
+  res.json(await accountService.decideHold(req.params.id, { action: "REJECT", actor: req.user, note: req.body?.note }))
 }))
 
 router.get("/admin/outbox/stats", authenticate, requireStaff, wrap(async (_req, res) => {

@@ -3,6 +3,55 @@
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Phase 7: Document computer-vision extension
+
+### Added
+- **document-cv-service** (FastAPI, OpenCV, Tesseract, port 3008): upload
+  validation (magic bytes, 10 MB, decompression-bomb guard, EXIF strip),
+  preprocessing (resize, perspective correction, denoise, deskew, CLAHE),
+  quality metrics, OCR with per-field confidences (amount, date, payee,
+  number, bank, currency), integrity analysis (ELA, noise inconsistency,
+  blockiness, copy-move), layout consistency, experimental signature
+  similarity with staff enrolment, cross-checks (amount vs declared, date
+  validity), perceptual-hash duplicate detection, a 9-feature vector, a
+  transparent risk score with CLEAN / REVIEW / SUSPICIOUS, envelope
+  encryption of stored images with BB84-derived data keys from the KMS,
+  `document.analyzed` Kafka events. 19 unit tests.
+- **Transaction gating**: `POST /transactions` accepts `documentId`; the
+  document row is locked, must be owned by the caller, unused, and analysed
+  for the declared amount. SUSPICIOUS documents (or duplicate / amount
+  mismatch) park the request in `held_transactions` (`202 held`); clean ones
+  execute with `document_id` on every ledger leg and in the outbox event.
+- **Staff holds**: `GET /admin/holds`, `POST /admin/holds/:id/release`
+  (re-executes the parked request atomically on behalf of the customer) and
+  `…/reject`; `GET /transactions/holds` for customers.
+- **Fraud feature schema v2** (17 dims = 7 transaction + has_document + 9 CV),
+  dataset v2 with planted document signals, consumer joins
+  `document_analyses` by id, `/fraud/score` accepts `documentId`, ablation
+  (with / without CV) in `eval_compare`.
+- Gateway: raw multipart passthrough (12 MB), `/documents/*`, `/admin/holds/*`.
+- Customer wizard: *Supporting document* step with analysis card and the
+  **Under review** outcome; overview banner for pending holds.
+- Staff portal: *Documents* group (Document review with decrypted image and
+  signal bars, Analysed documents, Signature enrolment).
+- The UI walkthrough uploads a check in the wizard and opens the staff
+  document panel (12 checks, new screenshots).
+- Schema: `document_analyses`, `signature_templates`, `held_transactions`,
+  `ledger_entries.document_id`; migration `003_cv_extension.sql`.
+- `make e2e-cv` (36 live checks) and `scripts/e2e/make_checks.py`, which
+  draws a fresh check layout per run (the duplicate index is global, so
+  stale samples would be flagged); `docs/CV_EXTENSION.md` technical reference.
+
+### Changed
+- Risk policy: a hard finding (`duplicate_document`, `amount_mismatch`,
+  `invalid_date`) lifts the verdict to at least `REVIEW` whatever the
+  weighted score says; ELA floors the reference block error so flat paper
+  no longer pins the score at 1.0.
+- BB84 now aborts the whole session when **any** round exceeds the QBER
+  threshold (previously one clean round was enough), and samples at least
+  16 bits per round for the QBER estimate. Eve is caught in every e2e run.
+- ledger-service and account-service expose `document_id` on ledger reads.
+
 ## [Unreleased] — Phase 6.1: Payments, wizard, end-to-end verification
 
 ### Added

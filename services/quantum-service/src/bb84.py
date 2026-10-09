@@ -123,7 +123,7 @@ def _bb84_round(n_qubits: int, with_eve: bool, qber_threshold: float, backend: s
     if not sifted_a:
         return {"accepted": False, "qber": 1.0, "sifted_key": [], "sifted_len": 0}
 
-    sample_n = max(4, min(len(sifted_a) // 4, len(sifted_a)))
+    sample_n = min(len(sifted_a), max(16, len(sifted_a) // 4))
     sample_idx = sorted(secrets.SystemRandom().sample(range(len(sifted_a)), sample_n))
     errors = sum(1 for i in sample_idx if sifted_a[i] != sifted_b[i])
     qber = errors / sample_n
@@ -152,12 +152,16 @@ def run_bb84(n_qubits: int, rounds: int, with_eve: bool,
     per_round = [_bb84_round(n_qubits, with_eve, qber_threshold, backend) for _ in range(rounds)]
     accepted_rounds = [r for r in per_round if r["accepted"]]
 
-    if not accepted_rounds:
+    # Security policy (Phase 7): ONE round above the QBER threshold aborts the
+    # whole session. An eavesdropper sits on the channel for every round, so a
+    # single clean-looking round (possible when the sampled subset is small)
+    # must not rescue the key. Majority vote below only merges clean rounds.
+    if len(accepted_rounds) < rounds:
         return {
             "accepted": False,
-            "reason": "all rounds exceeded QBER threshold (likely eavesdropping or noise)",
+            "reason": "at least one round exceeded the QBER threshold (eavesdropping or channel noise) — session aborted",
             "rounds_total": rounds,
-            "rounds_accepted": 0,
+            "rounds_accepted": len(accepted_rounds),
             "qber_per_round": [r["qber"] for r in per_round],
             "qber_threshold": qber_threshold,
             "with_eve": with_eve,

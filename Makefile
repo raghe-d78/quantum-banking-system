@@ -48,13 +48,17 @@ test:
 	cd services/ledger-service && npm test
 	cd services/api-gateway && npm test
 	cd services/fraud-service && python -m pytest tests -q
+	cd services/document-cv-service && python -m pytest tests -q
 
 # End-to-end checks against a running stack (see docs/USAGE_GUIDE.md §9).
 e2e-api:
 	node scripts/e2e/api-workflow.mjs
 
+e2e-cv:
+	python3 scripts/e2e/make_checks.py && node scripts/e2e/cv-workflow.mjs
+
 e2e-ui:
-	cd scripts/e2e && npm install --no-audit --no-fund && npx playwright install chromium && node ui-walkthrough.mjs
+	python3 scripts/e2e/make_checks.py && cd scripts/e2e && npm install --no-audit --no-fund && npx playwright install chromium && node ui-walkthrough.mjs
 
 prod:
 	docker compose -f $(COMPOSE_FILE) -f infrastructure/docker-compose.prod.yml up -d --build

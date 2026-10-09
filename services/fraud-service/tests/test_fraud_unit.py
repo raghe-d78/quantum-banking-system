@@ -10,7 +10,7 @@ import sys
 HERE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.abspath(os.path.join(HERE, "..")))
 
-from src.features import vectorize, FEATURE_DIM, FEATURE_NAMES
+from src.features import vectorize, vectorize_tx, cv_vector, FEATURE_DIM, FEATURE_NAMES, TX_DIM, CV_FEATURE_NAMES, CV_NEUTRAL
 from src.risk     import risk_level, decide
 
 
@@ -19,6 +19,30 @@ def test_vectorize_shape():
                   rolling_count=2, rolling_sum=200)
     assert v.shape == (FEATURE_DIM,)
     assert len(FEATURE_NAMES) == FEATURE_DIM
+
+
+def test_v2_vector_with_and_without_document():
+    base = vectorize(amount=100.0, ts="2024-01-15T10:30:00Z", rolling_count=2, rolling_sum=200)
+    assert base.shape == (FEATURE_DIM,) and FEATURE_DIM == TX_DIM + 1 + len(CV_FEATURE_NAMES) == 17
+    assert base[TX_DIM] == 0.0                      # has_document
+    assert base[TX_DIM + 1 + CV_FEATURE_NAMES.index("amount_match")] == CV_NEUTRAL["amount_match"]
+    doc = {"tampering_score": 0.8, "amount_match": 0.0, "duplicate_score": 1.0}
+    v = vectorize(amount=100.0, ts="2024-01-15T10:30:00Z", rolling_count=2, rolling_sum=200, cv=doc)
+    assert v[TX_DIM] == 1.0
+    assert v[TX_DIM + 1 + CV_FEATURE_NAMES.index("tampering_score")] == 0.8
+    assert v[TX_DIM + 1 + CV_FEATURE_NAMES.index("ocr_confidence")] == CV_NEUTRAL["ocr_confidence"]  # missing keys → neutral
+    assert (vectorize_tx(100.0, "2024-01-15T10:30:00Z", 2, 200) == base[:TX_DIM]).all()
+    assert cv_vector(None).shape == (10,)
+
+
+def test_dataset_v2_shape_and_document_rate():
+    from src.dataset import generate
+    X, y, names = generate(n_normal=400, n_fraud=100, seed=1)
+    assert X.shape == (500, FEATURE_DIM) and names == FEATURE_NAMES
+    has = X[:, TX_DIM]
+    assert 0.2 < has[y == 0].mean() < 0.5 and 0.4 < has[y == 1].mean() < 0.7
+    tamper = X[:, TX_DIM + 1 + CV_FEATURE_NAMES.index("tampering_score")]
+    assert tamper[(y == 1) & (has == 1)].mean() > tamper[(y == 0) & (has == 1)].mean()
 
 
 def test_vectorize_log_amount():

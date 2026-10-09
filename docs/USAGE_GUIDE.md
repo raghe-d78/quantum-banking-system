@@ -55,7 +55,7 @@ cp .env.example .env          # create your local env file
 docker compose up -d --build
 ```
 
-This brings up **11 containers**:
+This brings up **12 containers**:
 
 | Layer        | Containers                                                              |
 | ------------ | ----------------------------------------------------------------------- |
@@ -63,7 +63,7 @@ This brings up **11 containers**:
 | Messaging    | `kafka`, `kafka-init`                                                   |
 | Core banking | `identity-service`, `account-service`, `ledger-service`, `audit-service` |
 | Edge         | `api-gateway`                                                           |
-| Quantum/AI   | `quantum-service`, `kms-service`, `fraud-service`                       |
+| Quantum/AI   | `quantum-service`, `kms-service`, `fraud-service`, `document-cv-service` |
 
 First boot takes ~3-5 minutes (image pulls + npm installs in containers).
 
@@ -79,6 +79,7 @@ First boot takes ~3-5 minutes (image pulls + npm installs in containers).
 | 3005  | quantum-service                        |
 | 3006  | kms-service                            |
 | 3007  | fraud-service                          |
+| 3008  | document-cv-service (OCR, integrity)   |
 | 6379  | Redis                                  |
 | 8080  | CockroachDB admin UI (`http://localhost:8080`) |
 | 9093  | Kafka broker                           |
@@ -235,7 +236,17 @@ KID=$(curl -s -X POST http://localhost:3000/kms/keys -H "$H" | jq -r .kid)
 curl -s http://localhost:3000/kms/keys/$KID -H "$H"           # key material
 curl -s http://localhost:3000/kms/keys/$KID -H "$H"           # → 410 Gone
 
-# 5) Fraud score for a synthetic transaction
+# 5) Document CV (Phase 7): analyse a check, then attach it to a transfer
+python3 scripts/e2e/make_checks.py                      # writes scripts/e2e/samples/clean.jpg …
+C=$(curl -s -X POST http://localhost:3000/auth/customer/login -H 'Content-Type: application/json' \
+     -d '{"username":"alice","password":"<pw>"}' | jq -r .token)
+DOC=$(curl -s -F file=@scripts/e2e/samples/clean.jpg -F expectedAmount=320.0000 -F expectedCurrency=TND \
+     -H "Authorization: Bearer $C" http://localhost:3000/documents/analyze | tee /dev/stderr | jq -r .documentId)
+curl -s -X POST http://localhost:3000/transactions -H "Authorization: Bearer $C" -H 'Content-Type: application/json' \
+     -d "{\"kind\":\"TRANSFER\",\"destinationAccountId\":\"<bob account id>\",\"amount\":\"320.0000\",\"documentId\":\"$DOC\"}"
+# upload the same image again → duplicate → the next transaction answers 202 (held); staff: GET /admin/holds
+
+# 6) Fraud score for a synthetic transaction
 curl -s -X POST http://localhost:3000/fraud/score -H "$H" \
      -H 'Content-Type: application/json' \
      -d '{"transactionId":"adhoc-1","accountId":"demo","amount":50000,"timestamp":"2026-01-01T03:00:00Z"}'
@@ -267,6 +278,7 @@ Use real IBM hardware (Phase 3.5):
 ```bash
 make test                     # every unit suite in one go
 make e2e-api                  # 72 live checks through the gateway (stack must be up)
+make e2e-cv                   # 36 live checks for the document CV extension
 make e2e-ui                   # Playwright walkthrough of both portals + screenshots
 
 # Per package

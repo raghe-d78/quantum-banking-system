@@ -15,6 +15,8 @@ const T = {
   cancelled:  "ledger_db.public.cancelled_transactions",
   payees:     "account_db.public.payees",
   idem:       "ledger_db.public.idempotency_keys",
+  holds:      "ledger_db.public.held_transactions",
+  documents:  "fraud_db.public.document_analyses",
 }
 
 module.exports = { pool, T }

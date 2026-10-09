@@ -1,7 +1,8 @@
 // scripts/e2e/ui-walkthrough.mjs — drives both SPAs in headless Chromium against the
 // live stack and writes screenshots to ./shots. Needs `npm i playwright` next to it
-// (or PLAYWRIGHT_BROWSERS_PATH) and both Vite dev servers running (5173 / 5174).
-// Usage: cd scripts/e2e && node ui-walkthrough.mjs
+// (or PLAYWRIGHT_BROWSERS_PATH), both Vite dev servers running (5173 / 5174) and the
+// sample checks from make_checks.py (the wizard step uploads samples/clean.jpg).
+// Usage: cd scripts/e2e && python3 make_checks.py && node ui-walkthrough.mjs
 import { chromium } from "playwright";
 const GW = process.env.GATEWAY || "http://localhost:3000", CUST = process.env.CUSTOMER_URL || "http://localhost:5173", STAFF = process.env.STAFF_URL || "http://localhost:5174";
 const out = (n) => `shots/${n}.png`;
@@ -47,6 +48,12 @@ await page.waitForSelector(".alert.success", { timeout: 10000 });
 check("recipient verified", (await page.locator(".alert.success").textContent()).includes("Karim Ben Ali"));
 await page.locator('input[type="number"]').fill("320");
 await page.locator("input.input:not(.mono):not([type=number])").last().fill("Rent — October");
+// CV extension: attach a check, analyse it, expect CLEAN
+await page.locator('input[type="file"]').setInputFiles(new URL("./samples/clean.jpg", import.meta.url).pathname);
+await page.getByRole("button", { name: /analyse document/i }).click();
+await page.waitForSelector(".pill.green, .pill.amber, .pill.red", { timeout: 60000 });
+const docStatus = await page.locator(".receipt .pill").first().textContent();
+check("document analysed in the wizard", ["CLEAN", "REVIEW"].includes(docStatus.trim()), docStatus.trim());
 await page.waitForTimeout(450); await page.screenshot({ path: out("c03-transfer-details"), animations: "disabled" });
 await page.getByRole("button", { name: /review/i }).click();
 await page.waitForSelector(".receipt");
@@ -54,6 +61,7 @@ await page.waitForTimeout(450); await page.screenshot({ path: out("c04-transfer-
 await page.getByRole("button", { name: /confirm/i }).click();
 await page.waitForSelector(".success-ring", { timeout: 20000 });
 check("transfer completed in UI", norm(await page.locator(".receipt").textContent()).includes("2 180"), norm(await page.locator(".receipt").textContent()).slice(0, 80));
+check("receipt shows the attached document", (await page.locator(".receipt").textContent()).includes("Document"));
 await page.waitForTimeout(450); await page.screenshot({ path: out("c05-transfer-done"), animations: "disabled" });
 
 // bill payment via wizard
@@ -117,6 +125,17 @@ await page.waitForTimeout(2500);
 const cancelBtns = await page.getByRole("button", { name: /^cancel$/i }).count();
 check("fraud transactions view lists alerts with actions", cancelBtns >= 0, `cancel buttons: ${cancelBtns}`);
 await page.waitForTimeout(450); await page.screenshot({ path: out("s04-fraud-transactions"), animations: "disabled" });
+await page.locator(".nav-item", { hasText: "Document review" }).click();
+await page.waitForTimeout(2000);
+await page.screenshot({ path: out("s06-document-review"), animations: "disabled" });
+await page.locator(".nav-item", { hasText: "Analysed documents" }).click();
+await page.waitForTimeout(2000);
+const docRows = await page.locator(".card .pill").count();
+check("staff sees analysed documents", docRows >= 1, String(docRows));
+await page.locator(".card").first().click();
+await page.waitForSelector("img[alt='document']", { timeout: 15000 });
+check("staff can open the decrypted image + analysis panel", await page.locator("img[alt='document']").count() >= 1);
+await page.waitForTimeout(800); await page.screenshot({ path: out("s07-document-analysis"), animations: "disabled" });
 await page.locator(".nav-item", { hasText: "Fraud statistics" }).click();
 await page.waitForTimeout(2500);
 await page.waitForTimeout(450); await page.screenshot({ path: out("s05-fraud-stats"), animations: "disabled" });

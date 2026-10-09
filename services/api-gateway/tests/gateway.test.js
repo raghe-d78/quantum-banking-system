@@ -114,6 +114,25 @@ describe("proxy behaviour", () => {
     expect(cfg.headers["Idempotency-Key"]).toBe("abc-12345678")
     expect(cfg.data).toEqual({ kind: "WITHDRAW", amount: "5" })
   })
+  test("multipart upload is forwarded raw with its boundary; JSON bodies are refused", async () => {
+    axios.mockResolvedValue({ status: 201, data: { documentId: "d1" } })
+    const res = await request(app).post("/documents/analyze").set(auth)
+      .attach("file", Buffer.from([0xff, 0xd8, 0xff, 0x00]), { filename: "check.jpg", contentType: "image/jpeg" })
+      .field("expectedAmount", "25.0000")
+    expect(res.statusCode).toBe(201)
+    const cfg = axios.mock.calls[0][0]
+    expect(cfg.url).toMatch(/document-cv-service:3008\/documents\/analyze$/)
+    expect(cfg.headers["Content-Type"]).toMatch(/^multipart\/form-data; boundary=/)
+    expect(Buffer.isBuffer(cfg.data) && cfg.data.length > 50).toBe(true)
+    const bad = await request(app).post("/documents/analyze").set(auth).send({ nope: 1 })
+    expect(bad.statusCode).toBe(415)
+  })
+  test("document listing and signature enrolment are staff-only; own document read is not", async () => {
+    expect((await request(app).get("/documents").set(auth)).statusCode).toBe(403)
+    expect((await request(app).get("/documents/signatures/u1").set(auth)).statusCode).toBe(403)
+    axios.mockResolvedValue({ status: 200, data: { documentId: "d1" } })
+    expect((await request(app).get("/documents/d1").set(auth)).statusCode).toBe(200)
+  })
   test("security headers present", async () => {
     const res = await request(app).get("/health")
     expect(res.headers["x-content-type-options"]).toBe("nosniff")

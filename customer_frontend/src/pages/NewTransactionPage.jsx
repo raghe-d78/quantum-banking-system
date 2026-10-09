@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import api from "../lib/api";
 import { Button, Card, Field, Alert, Stepper, KV, Icon, Pill } from "../components/ui";
 import { fmtMoney, isUuid, errorMessage, KIND_LABEL } from "../lib/format";
+import DocumentUpload from "../components/DocumentUpload";
 
 const KINDS = [
   { key: "TRANSFER",         icon: "send",  title: "Transfer",       sub: "Send money to another Banque account", grad: "linear-gradient(135deg,#1a3a6b,#4a7fc1)" },
@@ -31,6 +32,7 @@ export default function NewTransactionPage({ initialKind = null, onDone }) {
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult]   = useState(null);
   const [error, setError]     = useState(null);
+  const [document, setDocument] = useState(null);   // analysis returned by /documents/analyze
 
   const kindCfg = KINDS.find(k => k.key === kind);
   const set = (k) => (e) => setForm(f => ({ ...f, [k]: e.target?.value ?? e }));
@@ -48,7 +50,7 @@ export default function NewTransactionPage({ initialKind = null, onDone }) {
   const amountOk = Number.isFinite(amount) && amount > 0;
   const afterBalance = balance ? balance.balance - amount : null;
 
-  const choose = (k) => { setKind(k); setForm({ amount: "", destinationAccountId: "", payeeCode: "", referenceNumber: "", reference: "" }); setRecipient(null); setVerifyErr(null); setError(null); setResult(null); setStep(1); };
+  const choose = (k) => { setKind(k); setForm({ amount: "", destinationAccountId: "", payeeCode: "", referenceNumber: "", reference: "" }); setRecipient(null); setVerifyErr(null); setError(null); setResult(null); setDocument(null); setStep(1); };
 
   const verifyRecipient = async () => {
     const id = form.destinationAccountId.trim();
@@ -78,6 +80,7 @@ export default function NewTransactionPage({ initialKind = null, onDone }) {
     if (kind === "TRANSFER") { body.destinationAccountId = recipient.accountId; body.reference = form.reference || undefined; }
     if (kind === "BILL_PAYMENT" || kind === "MERCHANT_PAYMENT") { body.payeeCode = payee.code; body.referenceNumber = form.referenceNumber || undefined; body.reference = form.reference || undefined; }
     if (kind === "WITHDRAW") body.note = form.reference || undefined;
+    if (document?.documentId) body.documentId = document.documentId;
     try {
       const { data } = await api.post("/transactions", body, { headers: { "Idempotency-Key": idemKey } });
       setResult(data.data); setStep(3);
@@ -163,6 +166,8 @@ export default function NewTransactionPage({ initialKind = null, onDone }) {
               <input className="input" value={form.reference} onChange={set("reference")} maxLength={100} placeholder={kind === "WITHDRAW" ? "e.g. Counter withdrawal" : "e.g. Rent — October"} />
             </Field>
 
+            <DocumentUpload amount={amount} analysis={document} onAnalysed={setDocument} onCleared={() => setDocument(null)} />
+
             {error && <Alert tone="error">{error}</Alert>}
           </div>
 
@@ -185,6 +190,7 @@ export default function NewTransactionPage({ initialKind = null, onDone }) {
             {payee && <KV k={kind === "BILL_PAYMENT" ? "Biller" : "Merchant"} v={payee.name} />}
             {form.referenceNumber && <KV k="Reference number" v={form.referenceNumber} mono />}
             {form.reference && <KV k="Message" v={form.reference} />}
+            {document && <KV k="Document" v={<><Pill tone={document.status === "CLEAN" ? "green" : document.status === "REVIEW" ? "amber" : "red"}>{document.status}</Pill> <span className="mono muted" style={{ fontWeight: 400 }}>{document.documentId.slice(0, 8)}…</span></>} />}
             <KV k="Amount" v={<span className="num" style={{ fontSize: 18 }}>{fmtMoney(amount)} TND</span>} />
             <KV k="Fees" v="0.000 TND" />
             {afterBalance !== null && <KV k="Balance after" v={<span className="num">{fmtMoney(afterBalance)} TND</span>} />}
@@ -198,7 +204,28 @@ export default function NewTransactionPage({ initialKind = null, onDone }) {
         </Card>
       )}
 
-      {step === 3 && result && (
+      {step === 3 && result?.held && (
+        <Card className="fade-in" style={{ textAlign: "center" }}>
+          <div className="success-ring" style={{ background: "var(--amber-100)", color: "var(--amber-600)" }}><Icon name="shield" size={32} /></div>
+          <div className="display" style={{ fontSize: 24 }}>Under review</div>
+          <p className="muted" style={{ margin: "6px 0 20px", maxWidth: 520, marginInline: "auto" }}>
+            Your {KIND_LABEL[result.kind]?.toLowerCase()} of <b className="num" style={{ color: "var(--ink-900)" }}>{fmtMoney(result.amount)} {result.currency}</b> was not executed.
+            The attached document needs manual verification by the bank. No money has left your account.
+          </p>
+          <div className="receipt" style={{ textAlign: "left", maxWidth: 480, margin: "0 auto" }}>
+            <KV k="Hold reference" v={result.holdId} mono />
+            <KV k="Reason" v={result.reason} />
+            <KV k="Document" v={<><Pill tone="red">{result.documentStatus}</Pill> <span className="mono muted" style={{ fontWeight: 400 }}>{result.documentId?.slice(0, 8)}…</span></>} />
+            <KV k="Date" v={new Date(result.timestamp).toLocaleString("en-GB")} />
+          </div>
+          <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 22 }}>
+            <Button variant="ghost" onClick={() => onDone?.("overview")}><Icon name="home" size={15} /> Back to overview</Button>
+            <Button onClick={reset}><Icon name="plus" size={15} /> New transaction</Button>
+          </div>
+        </Card>
+      )}
+
+      {step === 3 && result && !result.held && (
         <Card className="fade-in" style={{ textAlign: "center" }}>
           <div className="success-ring"><Icon name="check" size={32} stroke={3} /></div>
           <div className="display" style={{ fontSize: 24 }}>{result.replayed ? "Already processed" : "Transaction complete"}</div>
@@ -210,6 +237,7 @@ export default function NewTransactionPage({ initialKind = null, onDone }) {
             <KV k="Transaction id" v={result.transactionId} mono />
             <KV k="Date" v={new Date(result.timestamp).toLocaleString("en-GB")} />
             {result.reference && <KV k="Reference" v={result.reference} />}
+            {result.documentId && <KV k="Document" v={result.documentId} mono />}
             <KV k="New balance" v={<span className="num">{fmtMoney(result.newBalance)} {result.currency}</span>} />
           </div>
           <div style={{ display: "flex", gap: 10, justifyContent: "center", marginTop: 22 }}>

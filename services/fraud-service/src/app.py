@@ -127,9 +127,12 @@ def dismiss_alert(transaction_id: str):
 @require_staff
 def fraud_score():
     """
-    Ad-hoc scoring. Body accepts either a transaction event or raw features.
+    Ad-hoc scoring. Body is a transaction-shaped event, optionally with
+    "documentId" (joined from document_analyses) or an inline "document"
+    feature dict (CV extension).
     {
-      "transactionId": "...", "accountId": "...", "amount": 1234, "timestamp": "..."
+      "transactionId": "...", "accountId": "...", "amount": 1234, "timestamp": "...",
+      "documentId": "..." | "document": {"tampering_score": 0.8, ...}
     }
     """
     body = request.get_json(silent=True) or {}

@@ -7,7 +7,7 @@
 > project, engineered to industrial standards.
 
 [![CI](https://img.shields.io/badge/CI-node%20%7C%20python%20%7C%20frontends%20%7C%20docker-blue)]()
-[![Tests](https://img.shields.io/badge/tests-197%20unit%20%2B%2080%20e2e-success)]()
+[![Tests](https://img.shields.io/badge/tests-225%20unit%20%2B%20120%20e2e-success)]()
 [![Phases](https://img.shields.io/badge/phases-0--6%20complete-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Academic-blue)]()
 
@@ -54,6 +54,11 @@ points:
 - **Quantum ML** — a Variational Quantum Classifier scores every
   transaction next to a logistic-regression baseline, and the comparison
   is reported without spin ([`docs/comparative-analysis.md`](docs/comparative-analysis.md)).
+- **Document computer vision (Phase 7)** — checks attached to a transaction
+  are OCR'd, checked for tampering, duplicates, amount and date consistency,
+  encrypted with quantum-derived keys, and their nine features feed the same
+  classifier. Suspicious documents park the transaction for staff review.
+  Full reference: [`docs/CV_EXTENSION.md`](docs/CV_EXTENSION.md).
 
 Everything else is deliberately boring and correct: double-entry ledger,
 one-transaction atomicity, transactional outbox, idempotent consumers,
@@ -119,7 +124,8 @@ effectively-exactly-once rows.
 | **audit-service** | 3004 | Node 20, kafkajs | Consumes both topics, append-only audit log keyed on (tx, account, event) |
 | **quantum-service** | 3005 | Python 3.11, Qiskit | QRNG, BB84, circuit rendering; Aer or IBM runtime |
 | **kms-service** | 3006 | Node 20 | BB84-derived AES-256-GCM keys in Redis, read-once, staff-only |
-| **fraud-service** | 3007 | Python 3.11, scikit-learn, Qiskit ML | Scores every event with LR + VQC, raises / closes alerts |
+| **fraud-service** | 3007 | Python 3.11, scikit-learn, Qiskit ML | Scores every event with LR + VQC on 17 features (transaction + document), raises / closes alerts |
+| **document-cv-service** | 3008 | Python 3.11, FastAPI, OpenCV, Tesseract | Check / document analysis: OCR, tampering, signature, cross-checks, duplicates, encrypted storage, `document.analyzed` events |
 | `shared/` | — | Node | `money` (decimal.js), `db` (pool + retrying transactions), `auth`, `errors`, `cache`, `logger` |
 
 ### Frontends
@@ -142,6 +148,10 @@ Captured by `make e2e-ui` against the live stack (more in [`docs/screenshots/`](
 | Customer overview | New transaction — review | Staff fraud dashboard |
 |---|---|---|
 | ![Overview](docs/screenshots/c02-overview.png) | ![Review](docs/screenshots/c04-transfer-review.png) | ![Fraud](docs/screenshots/s04-fraud-transactions.png) |
+
+| Wizard — check analysed in place | Staff — held transactions | Staff — decrypted image + signals |
+|---|---|---|
+| ![Document step](docs/screenshots/c03-transfer-details.png) | ![Document review](docs/screenshots/s06-document-review.png) | ![Analysis](docs/screenshots/s07-document-analysis.png) |
 
 ---
 
@@ -339,11 +349,12 @@ make test        # every suite on the host
 | Package | Suites | Tests | Covers |
 |---|---|---|---|
 | shared | 1 | 25 | Money arithmetic, rounding, currency guards |
-| account-service | 8 | 84 | Atomic deposit / withdraw / transfer, ownership, daily cap, 40001 retry, cancellation, export escaping, route status mapping |
+| account-service | 9 | 92 | Atomic deposit / withdraw / transfer, ownership, daily cap, 40001 retry, cancellation, export escaping, route status mapping |
 | identity-service | 3 | 30 | Login per portal, suspension, refresh, validation, provisioning, admin CRUD |
 | ledger-service | 2 | 16 | Append-only contract, reconciliation, auth gates |
-| api-gateway | 1 | 26 | Edge auth, role gates, header forwarding, raw passthrough, 502/504 mapping |
-| fraud-service | 2 | 13 | Feature math, risk policy, JWT decorator |
+| api-gateway | 1 | 28 | Edge auth, role gates, header forwarding, raw passthrough, 502/504 mapping |
+| fraud-service | 2 | 15 | Feature math (v2 with CV block), risk policy, JWT decorator |
+| document-cv-service | 1 | 19 | Validation, preprocessing, OCR parsing, tampering, layout, signature, risk policy, encryption envelope, full pipeline |
 
 CI runs all six, lints and builds both frontends, validates both compose
 files and builds every image.
@@ -354,8 +365,9 @@ files and builds every image.
 make e2e-api     # 72 checks through the gateway: auth, RBAC, deposits, transfers,
                  # payments, idempotency, limits, export, reconciliation, audit,
                  # cancellation, fraud, QRNG, BB84, KMS, refresh rotation, suspension
-make e2e-ui      # Playwright drives both portals (login → wizard → history → detail,
-                 # staff deposit → fraud dashboard) and writes screenshots to scripts/e2e/shots
+make e2e-cv      # 36 checks for the document CV extension: OCR, duplicates, holds, release, v2 scoring
+make e2e-ui      # Playwright drives both portals (login → wizard with check upload → history →
+                 # detail, staff deposit → fraud dashboard → document review), 12 checks + screenshots
 ```
 
 Both scripts were run against CockroachDB v24.1, Apache Kafka 3.7 and Redis 7
@@ -377,6 +389,11 @@ Interactive Swagger UI at <http://localhost:3000/docs>, JSON at `/docs.json`.
 | `GET /transactions`, `/transactions/:id`, `/transactions/export` | any | Own history, detail, CSV / statement |
 | `POST /transactions` | any | Unified create: transfer, bill, merchant, withdraw (idempotent) |
 | `GET /payees` | any | Billers and merchants |
+| `POST /documents/analyze` | any | Upload a check (multipart) → OCR, integrity, risk, `documentId` |
+| `GET /documents/:id`, `/documents/:id/image` | owner, staff | Analysis and decrypted image |
+| `GET /transactions/holds` | any | Own transactions suspended by the document policy |
+| `GET /admin/holds`, `POST /admin/holds/:id/release|reject` | staff | Manual verification of held transactions |
+| `GET /documents`, `POST /documents/signatures/:userId` | staff | All analysed documents, signature enrolment |
 | `POST /transfer`, `POST /withdraw` | any | Legacy single-purpose endpoints (still supported) |
 | `GET /quantum/*` , `POST /quantum/qkd/bb84` | any | Quantum demos |
 | `POST /admin/deposit` | staff | Credit any account |
@@ -407,7 +424,8 @@ quantum-banking-system/
 │   ├── audit-service/      Kafka → audit_logs
 │   ├── quantum-service/    QRNG, BB84, viz (Python)
 │   ├── kms-service/        BB84-derived keys
-│   └── fraud-service/      LR + VQC scoring, alerts (Python)
+│   ├── fraud-service/      LR + VQC scoring, alerts (Python)
+│   └── document-cv-service/ OCR, tampering, signature, encrypted documents (Python)
 ├── shared/                 money, db, auth, errors, cache, logger (+ tests)
 ├── customer_frontend/      React SPA
 ├── staff_frontend/         React SPA (fraud dashboard)
@@ -421,7 +439,7 @@ quantum-banking-system/
 │   ├── init-db.sql               fresh-cluster schema
 │   ├── migrations/               upgrades for existing clusters
 │   └── loadtest/                 concurrent deposits (node + k6)
-├── docs/                   usage guide, comparative analysis, quantum diagrams, code graph
+├── docs/                   usage guide, CV extension reference, comparative analysis, quantum diagrams
 ├── ROADMAP.md · CHANGELOG.md · development_plan.md
 └── Makefile
 ```
@@ -436,6 +454,10 @@ quantum-banking-system/
 - **Phase 3 / 3.5** — quantum-service (QRNG, BB84, viz), KMS, verified on IBM hardware.
 - **Phase 4 / 4.5** — fraud-service (LR + VQC), cancellation with compensating entries, staff fraud dashboard.
 - **Phase 5** — coverage ≥ 60 %, Caddy HTTPS, centralized secrets, comparative report.
+- **Phase 7 — Document computer vision** — document-cv-service (OCR,
+  integrity, signature, cross-checks, duplicates, encrypted storage), held
+  transactions with staff release, fraud feature schema v2, customer upload
+  step and staff review pages. Reference: [`docs/CV_EXTENSION.md`](docs/CV_EXTENSION.md).
 - **Phase 6 — Industrial hardening** — single-transaction money path, edge
   authentication and RBAC for every route, ownership checks, locked
   withdraws, composite audit/fraud keys, cancellation-aware fraud alerts,

@@ -55,6 +55,9 @@ services:
   fraud-service:
     ports: !reset []
     deploy: { resources: { limits: { cpus: "2.0", memory: 3G } } }
+  document-cv-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "2.0", memory: 1536M } } }
   cockroachdb:
     ports: !reset []
   redis:

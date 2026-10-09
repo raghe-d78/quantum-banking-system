@@ -33,6 +33,11 @@ function installRepoMocks() {
     enqueue: jest.fn(async () => "outbox-id"),
     claimPendingBatch: jest.fn(), markSent: jest.fn(), markFailed: jest.fn(), stats: jest.fn(async () => ({})),
   }))
+  jest.doMock("../../src/repositories/document.repository", () => ({
+    getDocumentForUpdate: jest.fn(async () => undefined), linkDocument: jest.fn(),
+    createHold: jest.fn(async () => ({ id: "hold-1", created_at: new Date() })), getHoldForUpdate: jest.fn(),
+    decideHold: jest.fn(), listHolds: jest.fn(async () => []),
+  }))
   jest.doMock("/shared/cache", () => ({
     connect: jest.fn(), disconnect: jest.fn(), get: jest.fn(async () => null),
     setEx: jest.fn(), del: jest.fn(), publishInvalidate: jest.fn(),

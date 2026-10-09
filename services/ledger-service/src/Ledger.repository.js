@@ -28,7 +28,7 @@ exports.append = async ({ accountId, type, amount, balanceSnapshot, reference = 
 exports.findByAccountId = async (accountId, { limit = 100, offset = 0 } = {}) => {
   const result = await pool.query(
     `SELECT id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
-            reference, compensates, initiated_by, created_at
+            reference, compensates, initiated_by, document_id, created_at
        FROM ${LEDGER}
       WHERE account_id = $1
       ORDER BY created_at ASC, id ASC
@@ -41,7 +41,7 @@ exports.findByAccountId = async (accountId, { limit = 100, offset = 0 } = {}) =>
 exports.findById = async (id) => {
   const result = await pool.query(
     `SELECT id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
-            reference, compensates, initiated_by, created_at
+            reference, compensates, initiated_by, document_id, created_at
        FROM ${LEDGER} WHERE id = $1`,
     [id]
   );
@@ -53,7 +53,7 @@ exports.findById = async (id) => {
 exports.findByTransactionId = async (transactionId) => {
   const result = await pool.query(
     `SELECT id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
-            reference, compensates, initiated_by, created_at
+            reference, compensates, initiated_by, document_id, created_at
        FROM ${LEDGER} WHERE transaction_id = $1
       ORDER BY account_id ASC, created_at ASC`,
     [transactionId]

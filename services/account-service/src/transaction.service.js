@@ -19,7 +19,7 @@ exports.listForAccount = async (accountId, filters = {}) => {
   const { type, txType, dateFrom, dateTo, minAmount, maxAmount, initiatedBy, limit = 20, offset = 0, order = "DESC" } = filters
   const params = [accountId]
   let sql = `SELECT id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
-                    reference, compensates, initiated_by, created_at
+                    reference, compensates, initiated_by, document_id, created_at
                FROM ${T.ledger} WHERE account_id = $1`
 
   if (type && VALID_TYPES.includes(String(type).toUpperCase())) { params.push(String(type).toUpperCase()); sql += ` AND type = $${params.length}` }
@@ -62,6 +62,7 @@ const formatTx = (tx) => ({
   balanceSnapshot: parseFloat(tx.balance_snapshot),
   reference:       tx.reference ?? null,
   compensates:     tx.compensates ?? null,
+  documentId:      tx.document_id ?? null,
   date:            new Date(tx.created_at).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" }),
   createdAt:       tx.created_at,
   initiatedBy:     INITIATOR[tx.tx_type] || "Customer",

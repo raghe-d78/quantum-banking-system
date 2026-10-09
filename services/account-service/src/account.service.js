@@ -19,12 +19,18 @@ const { isStaff } = require("/shared/auth")
 const accountRepo = require("./repositories/account.repository")
 const ledgerRepo  = require("./repositories/ledger.repository")
 const outboxRepo  = require("./repositories/outbox.repository")
+const docRepo     = require("./repositories/document.repository")
 
 const TX_TOPIC        = process.env.TX_EVENTS_TOPIC    || "transaction.events"
 const CANCELLED_TOPIC = process.env.TX_CANCELLED_TOPIC || "transaction.cancelled"
 const BALANCE_TTL_SEC = Number(process.env.BALANCE_CACHE_TTL || 60)
 const DAILY_TRANSFER_LIMIT_TND = Number(process.env.DAILY_TRANSFER_LIMIT_TND || 10000)
 const MAX_TX_AMOUNT = process.env.MAX_TX_AMOUNT || "1000000000"
+// Document-risk policy (CV extension §11): which document outcomes park the
+// transaction for manual verification instead of executing it.
+const HOLD_ON_STATUS  = (process.env.DOCUMENT_HOLD_ON_STATUS || "SUSPICIOUS").split(",").map(s => s.trim().toUpperCase())
+const HOLD_ON_REASONS = (process.env.DOCUMENT_HOLD_ON_REASONS || "duplicate_document,amount_mismatch").split(",").map(s => s.trim())
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 const balanceKey = (userId) => `balance:user:${userId}`
 const nowIso = () => new Date().toISOString()
@@ -126,7 +132,7 @@ exports.deposit = async (accountId, amount, opts = {}) => {
 }
 
 // ── withdraw (customer, own account) ──────────────────────────────
-async function withdrawTx(client, userId, amount, note) {
+async function withdrawTx(client, userId, amount, note, documentId = null) {
   const account = await accountRepo.getAccountForUpdateByUserId(client, userId)
   if (!account) throw E.notFound("Account not found")
   assertActive(account)
@@ -145,19 +151,20 @@ async function withdrawTx(client, userId, amount, note) {
   await ledgerRepo.insertEntry(client, {
     transactionId, accountId: account.id, type: "DEBIT", txType: "WITHDRAW",
     amount: withdrawMoney.toFixed(4), balance_snapshot: newMoney.toFixed(4),
-    reference, created_at: timestamp, initiatedBy: userId,
+    reference, created_at: timestamp, initiatedBy: userId, documentId,
   })
+  if (documentId) await docRepo.linkDocument(client, documentId, transactionId)
   await accountRepo.updateBalance(client, account.id, newMoney.toFixed(4))
   await outboxRepo.enqueue(client, {
     transactionId, topic: TX_TOPIC, partitionKey: account.id,
     payload: {
       transactionId, type: "WITHDRAW", kind: "WITHDRAW", accountId: account.id,
       amount: num(withdrawMoney), currency, balanceSnapshot: num(newMoney),
-      reference, initiatedBy: userId, timestamp,
+      reference, initiatedBy: userId, timestamp, documentId,
     },
   })
   return {
-    transactionId, accountId: account.id,
+    transactionId, accountId: account.id, documentId,
     previousBalance: num(currentMoney), newBalance: num(newMoney),
     amount: num(withdrawMoney), currency, reference: cleanRef(note), timestamp,
     _users: [userId],
@@ -176,7 +183,7 @@ exports.withdraw = async (userId, amount, note) => {
 // `actor` is the authenticated JWT payload. Customers may only debit their
 // own account; staff may move money between any two accounts.
 async function moveFundsTx(client, sourceAccountId, destinationAccountId, amount, options = {}) {
-  const { reference = null, actor = null, txType = "TRANSFER", counterparty = null } = options
+  const { reference = null, actor = null, txType = "TRANSFER", counterparty = null, documentId = null, onBehalfOf = null } = options
   if (!ledgerRepo.OUTBOUND_TYPES.includes(txType)) throw E.validation(`Unsupported transaction kind: ${txType}`)
 
   // Lock both rows in a deterministic order so A→B and B→A cannot deadlock.
@@ -188,6 +195,8 @@ async function moveFundsTx(client, sourceAccountId, destinationAccountId, amount
 
   if (actor && !isStaff(actor) && sourceAccount.user_id !== actor.userId)
     throw E.forbidden("You can only transfer from your own account")
+  if (onBehalfOf && sourceAccount.user_id !== onBehalfOf)
+    throw E.forbidden("Held request does not belong to this account")
 
   assertActive(sourceAccount)
   assertActive(destAccount)
@@ -226,17 +235,18 @@ async function moveFundsTx(client, sourceAccountId, destinationAccountId, amount
   await ledgerRepo.insertEntry(client, {
     transactionId, accountId: sourceAccountId, type: "DEBIT", txType,
     amount: transferMoney.toFixed(4), balance_snapshot: newSourceMoney.toFixed(4),
-    reference: debitRef, created_at: timestamp, initiatedBy,
+    reference: debitRef, created_at: timestamp, initiatedBy, documentId,
   })
   await ledgerRepo.insertEntry(client, {
     transactionId, accountId: destinationAccountId, type: "CREDIT", txType,
     amount: transferMoney.toFixed(4), balance_snapshot: newDestMoney.toFixed(4),
-    reference: creditRef, created_at: timestamp, initiatedBy,
+    reference: creditRef, created_at: timestamp, initiatedBy, documentId,
   })
+  if (documentId) await docRepo.linkDocument(client, documentId, transactionId)
   await accountRepo.updateBalance(client, sourceAccountId,      newSourceMoney.toFixed(4))
   await accountRepo.updateBalance(client, destinationAccountId, newDestMoney.toFixed(4))
 
-  const common = { transactionId, kind: txType, amount: num(transferMoney), currency, initiatedBy, timestamp,
+  const common = { transactionId, kind: txType, amount: num(transferMoney), currency, initiatedBy, timestamp, documentId,
                    counterparty: counterparty ? { code: counterparty.code, name: counterparty.name } : null }
   await outboxRepo.enqueue(client, {
     transactionId, topic: TX_TOPIC, partitionKey: sourceAccountId,
@@ -250,7 +260,7 @@ async function moveFundsTx(client, sourceAccountId, destinationAccountId, amount
   })
 
   return {
-    transactionId, kind: txType,
+    transactionId, kind: txType, documentId,
     source:      { accountId: sourceAccountId,      previousBalance: num(sourceMoney), newBalance: num(newSourceMoney) },
     destination: { accountId: destinationAccountId, previousBalance: num(destMoney),   newBalance: num(newDestMoney) },
     amount: num(transferMoney), currency, reference: cleanRef(reference), timestamp,
@@ -280,6 +290,67 @@ exports.transfer = async (sourceAccountId, destinationAccountId, amount, options
 // replay the stored response; a concurrent duplicate gets 409.
 const KINDS = ["TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT", "WITHDRAW"]
 
+// Validate + lock the supporting document. Returns the document row or null.
+async function checkDocument(client, documentId, ownerUserId, declaredAmount) {
+  if (!documentId) return null
+  if (!UUID_RE.test(String(documentId))) throw E.validation("documentId must be a UUID")
+  const doc = await docRepo.getDocumentForUpdate(client, documentId)
+  if (!doc) throw E.notFound("Document not found")
+  if (doc.owner_user_id !== ownerUserId) throw E.forbidden("Document belongs to another customer")
+  if (doc.transaction_id) throw E.conflict("DOCUMENT_ALREADY_USED", "This document is already attached to a transaction")
+  if (doc.expected_amount !== null && doc.expected_amount !== undefined && declaredAmount !== undefined) {
+    const a = new Money(doc.expected_amount, "TND"), b = new Money(declaredAmount, "TND")
+    if (!a.isEqualTo(b)) throw E.validation("Document was analysed for a different amount; upload it again")
+  }
+  return doc
+}
+
+function holdDecision(doc) {
+  if (!doc) return null
+  const reasons = Array.isArray(doc.reasons) ? doc.reasons : []
+  if (HOLD_ON_STATUS.includes(String(doc.status).toUpperCase())) return `document ${doc.status} (risk ${Number(doc.risk_score).toFixed(2)})`
+  const hard = reasons.filter(r => HOLD_ON_REASONS.includes(r))
+  if (hard.length) return `document flagged: ${hard.join(", ")}`
+  return null
+}
+
+// Execute one request body as `owner` (used by createTransaction and by hold release).
+async function executeRequestTx(client, owner, body, actor, documentId = null) {
+  const kind = String(body.kind || "").toUpperCase()
+  if (kind === "WITHDRAW") {
+    const w = await withdrawTx(client, owner, body.amount, body.note ?? body.reference, documentId)
+    return { transactionId: w.transactionId, kind, amount: w.amount, currency: w.currency, documentId,
+             newBalance: w.newBalance, reference: w.reference, timestamp: w.timestamp, counterparty: null, _users: w._users }
+  }
+  const source = await accountRepo.findByUserId(owner, client)
+  if (!source) throw E.notFound("Account not found")
+
+  let destinationAccountId, counterparty = null, reference = body.reference
+  if (kind === "TRANSFER") {
+    destinationAccountId = body.destinationAccountId
+  } else {
+    const code = body.payeeCode || body.billerCode || body.merchantCode
+    if (!code) throw E.validation("payeeCode is required")
+    const payee = await accountRepo.findPayeeByCode(code, client)
+    if (!payee) throw E.notFound(`Unknown payee: ${code}`)
+    const expected = kind === "BILL_PAYMENT" ? "BILLER" : "MERCHANT"
+    if (payee.kind !== expected) throw E.validation(`${payee.code} is a ${payee.kind.toLowerCase()}, not valid for ${kind}`)
+    if (kind === "BILL_PAYMENT" && !cleanRef(body.referenceNumber, 64))
+      throw E.validation("referenceNumber is required for bill payments")
+    destinationAccountId = payee.account_id
+    counterparty = { code: payee.code, name: payee.name }
+    const refNo = cleanRef(body.referenceNumber, 64)
+    reference = refNo ? `${payee.name} · ${refNo}` : (cleanRef(body.reference) ? `${payee.name} · ${cleanRef(body.reference)}` : payee.name)
+  }
+
+  validateMove(source.id, destinationAccountId, body.amount, reference)
+  const m = await moveFundsTx(client, source.id, destinationAccountId, body.amount,
+    { reference, actor, txType: kind, counterparty, documentId, onBehalfOf: owner })
+  return { transactionId: m.transactionId, kind, amount: m.amount, currency: m.currency, documentId,
+           newBalance: m.source.newBalance, reference: m.reference ?? reference, timestamp: m.timestamp,
+           counterparty: m.counterparty || { accountId: destinationAccountId }, _users: m._users }
+}
+
 exports.createTransaction = async (actor, body = {}, idempotencyKey = null) => {
   if (!actor?.userId) throw E.forbidden("Authentication required")
   const kind = String(body.kind || "").toUpperCase()
@@ -297,41 +368,24 @@ exports.createTransaction = async (actor, body = {}, idempotencyKey = null) => {
       }
     }
 
+    // ── Document-risk gate (CV extension) ───────────────────────────
+    const doc = await checkDocument(client, body.documentId, actor.userId, body.amount)
+    const holdReason = holdDecision(doc)
     let out
-    if (kind === "WITHDRAW") {
-      const w = await withdrawTx(client, actor.userId, body.amount, body.note ?? body.reference)
-      out = { transactionId: w.transactionId, kind, amount: w.amount, currency: w.currency,
-              newBalance: w.newBalance, reference: w.reference, timestamp: w.timestamp, counterparty: null, _users: w._users }
+    if (holdReason) {
+      const account = await accountRepo.findByUserId(actor.userId, client)
+      if (!account) throw E.notFound("Account not found")
+      const { documentId: _d, ...request } = body
+      const hold = await docRepo.createHold(client, {
+        userId: actor.userId, accountId: account.id, kind, request, documentId: doc.document_id,
+        reason: holdReason, riskScore: doc.risk_score,
+      })
+      out = { held: true, holdId: hold.id, kind, amount: num(parseAmount(body.amount, "TND")), currency: account.currency,
+              documentId: doc.document_id, documentStatus: doc.status, reason: holdReason,
+              message: "Transaction suspended pending manual verification of the attached document", timestamp: nowIso(), _users: [] }
     } else {
-      const source = await accountRepo.findByUserId(actor.userId, client)
-      if (!source) throw E.notFound("Account not found")
-
-      let destinationAccountId, counterparty = null, reference = body.reference
-      if (kind === "TRANSFER") {
-        destinationAccountId = body.destinationAccountId
-      } else {
-        const code = body.payeeCode || body.billerCode || body.merchantCode
-        if (!code) throw E.validation("payeeCode is required")
-        const payee = await accountRepo.findPayeeByCode(code, client)
-        if (!payee) throw E.notFound(`Unknown payee: ${code}`)
-        const expected = kind === "BILL_PAYMENT" ? "BILLER" : "MERCHANT"
-        if (payee.kind !== expected) throw E.validation(`${payee.code} is a ${payee.kind.toLowerCase()}, not valid for ${kind}`)
-        if (kind === "BILL_PAYMENT" && !cleanRef(body.referenceNumber, 64))
-          throw E.validation("referenceNumber is required for bill payments")
-        destinationAccountId = payee.account_id
-        counterparty = { code: payee.code, name: payee.name }
-        const refNo = cleanRef(body.referenceNumber, 64)
-        reference = refNo ? `${payee.name} · ${refNo}` : (cleanRef(body.reference) ? `${payee.name} · ${cleanRef(body.reference)}` : payee.name)
-      }
-
-      validateMove(source.id, destinationAccountId, body.amount, reference)
-      const m = await moveFundsTx(client, source.id, destinationAccountId, body.amount,
-        { reference, actor, txType: kind, counterparty })
-      out = { transactionId: m.transactionId, kind, amount: m.amount, currency: m.currency,
-              newBalance: m.source.newBalance, reference: m.reference ?? reference, timestamp: m.timestamp,
-              counterparty: m.counterparty || { accountId: destinationAccountId }, _users: m._users }
+      out = await executeRequestTx(client, actor.userId, body, actor, doc ? doc.document_id : null)
     }
-
     if (idempotencyKey) {
       const { _users, ...stored } = out
       await accountRepo.storeIdempotentResponse(client, actor.userId, idempotencyKey, stored)
@@ -427,4 +481,30 @@ exports.cancelTransaction = async (originalTransactionId, { reason, cancelledBy 
   return result
 }
 
-exports._internal = { parseAmount, balanceKey, KINDS }
+// ── Held transactions (staff) ─────────────────────────────────────
+exports.listHolds = (filters) => docRepo.listHolds(filters)
+
+exports.decideHold = async (holdId, { action, actor, note }) => {
+  if (!UUID_RE.test(String(holdId))) throw E.validation("holdId must be a UUID")
+  if (!["RELEASE", "REJECT"].includes(String(action).toUpperCase())) throw E.validation("action must be RELEASE or REJECT")
+  if (!actor?.userId || !isStaff(actor)) throw E.forbidden("Staff access required")
+
+  const result = await withTransaction(accountRepo.pool, async (client) => {
+    const hold = await docRepo.getHoldForUpdate(client, holdId)
+    if (!hold) throw E.notFound("Hold not found")
+    if (hold.status !== "PENDING_REVIEW") throw E.conflict("HOLD_ALREADY_DECIDED", `Hold is already ${hold.status}`, { existing: { status: hold.status, decidedBy: hold.decided_by } })
+
+    if (String(action).toUpperCase() === "REJECT") {
+      await docRepo.decideHold(client, holdId, { status: "REJECTED", decidedBy: actor.userId, note })
+      return { ok: true, holdId, status: "REJECTED", _users: [] }
+    }
+    const request = typeof hold.request === "string" ? JSON.parse(hold.request) : hold.request
+    const exec = await executeRequestTx(client, hold.user_id, request, actor, hold.document_id)
+    await docRepo.decideHold(client, holdId, { status: "RELEASED", decidedBy: actor.userId, note, transactionId: exec.transactionId })
+    return { ok: true, holdId, status: "RELEASED", transaction: (({ _users, ...r }) => r)(exec), _users: exec._users }
+  })
+  invalidateAll(result._users); delete result._users
+  return result
+}
+
+exports._internal = { parseAmount, balanceKey, KINDS, holdDecision }

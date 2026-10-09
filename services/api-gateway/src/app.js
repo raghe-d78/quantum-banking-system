@@ -103,7 +103,9 @@ const U = {
   quantum:  process.env.QUANTUM_SERVICE_URL  || "http://quantum-service:3005",
   kms:      process.env.KMS_SERVICE_URL      || "http://kms-service:3006",
   fraud:    process.env.FRAUD_SERVICE_URL    || "http://fraud-service:3007",
+  cv:       process.env.DOCUMENT_CV_SERVICE_URL || "http://document-cv-service:3008",
 }
+const UPLOAD_LIMIT = process.env.UPLOAD_LIMIT || "12mb"
 const DEFAULT_TIMEOUT = Number(process.env.UPSTREAM_TIMEOUT_MS || 10000)
 
 const fwdHeaders = (req) => ({
@@ -129,6 +131,29 @@ function proxy(base, { method, path, timeout = DEFAULT_TIMEOUT, query = true, bo
     } catch (err) {
       const code = err.code === "ECONNABORTED" ? 504 : 502
       log.warn("upstream error", { id: req.id, url, err: err.message })
+      res.status(code).json({ ok: false, code: code === 504 ? "UPSTREAM_TIMEOUT" : "UPSTREAM_UNAVAILABLE", message: "Upstream service unavailable" })
+    }
+  }
+}
+
+// Multipart passthrough for uploads: the raw body is forwarded untouched with
+// its original Content-Type (boundary included), so the upstream parses it.
+const multipartBody = express.raw({ type: ["multipart/form-data"], limit: UPLOAD_LIMIT })
+function proxyUpload(base, { path, timeout = 60000 } = {}) {
+  return async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || !/^multipart\/form-data/i.test(req.headers["content-type"] || ""))
+      return res.status(415).json({ ok: false, code: "UNSUPPORTED_MEDIA_TYPE", message: "multipart/form-data body required" })
+    const url = `${base}${typeof path === "function" ? path(req) : (path ?? req.path)}`
+    try {
+      const r = await axios({
+        method: "POST", url, data: req.body,
+        params: req.query, timeout, validateStatus: () => true, maxBodyLength: Infinity, maxContentLength: Infinity,
+        headers: { ...fwdHeaders(req), "Content-Type": req.headers["content-type"], "Content-Length": String(req.body.length) },
+      })
+      res.status(r.status).json(r.data)
+    } catch (err) {
+      const code = err.code === "ECONNABORTED" ? 504 : 502
+      log.warn("upload upstream error", { id: req.id, url, err: err.message })
       res.status(code).json({ ok: false, code: code === 504 ? "UPSTREAM_TIMEOUT" : "UPSTREAM_UNAVAILABLE", message: "Upstream service unavailable" })
     }
   }
@@ -183,7 +208,13 @@ app.get("/payees",                  proxy(U.account))
 app.post("/transactions",           proxy(U.account, { timeout: 15000 }))
 app.get("/transactions",            proxy(U.account))
 app.get("/transactions/export",     proxyRaw(U.account, { timeout: 30000 }))
+app.get("/transactions/holds",      proxy(U.account))
 app.get("/transactions/:id",        proxy(U.account))
+
+// documents (CV extension): any role may upload and read their own documents
+app.post("/documents/analyze",   multipartBody, proxyUpload(U.cv, { path: "/documents/analyze" }))
+app.get("/documents/:id",        proxy(U.cv))
+app.get("/documents/:id/image",  proxyRaw(U.cv))
 
 // quantum demos (any authenticated role)
 app.get("/quantum/backend",        proxy(U.quantum, { path: "/backend" }))
@@ -192,7 +223,8 @@ app.post("/quantum/qkd/bb84",      proxy(U.quantum, { path: "/qkd/bb84", timeout
 app.get("/quantum/qkd/visualize",  proxyRaw(U.quantum, { path: "/qkd/visualize", timeout: 30000 }))
 
 // ── Staff / admin surface ─────────────────────────────────────────
-app.use(["/admin", "/fraud", "/kms", "/ledger", "/audit"], requireStaff)
+app.use(["/admin", "/fraud", "/kms", "/ledger", "/audit", "/documents/signatures"], requireStaff)
+app.get("/documents", requireStaff)   // listing is staff-only; /documents/:id stays owner-or-staff (checked upstream)
 
 // identity admin (identity enforces admin-only where required)
 app.post("/admin/users",       proxy(U.identity))
@@ -207,6 +239,15 @@ app.get("/admin/accounts/:id",                       proxy(U.account))
 app.get("/admin/accounts/:id/transactions",          proxy(U.account))
 app.post("/admin/transactions/:id/cancel",           proxy(U.account, { timeout: 15000 }))
 app.get("/admin/outbox/stats",                       proxy(U.account))
+app.get("/admin/holds",                              proxy(U.account))
+app.post("/admin/holds/:id/release",                 proxy(U.account, { timeout: 15000 }))
+app.post("/admin/holds/:id/reject",                  proxy(U.account))
+
+// documents admin (CV extension)
+app.get("/documents",                                proxy(U.cv))
+app.post("/documents/:id/review",                    proxy(U.cv))
+app.post("/documents/signatures/:userId",            multipartBody, proxyUpload(U.cv))
+app.get("/documents/signatures/:userId",             proxy(U.cv))
 
 // ledger read-side + reconciliation
 app.get("/ledger/accounts/:id/entries",   proxy(U.ledger))

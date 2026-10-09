@@ -106,6 +106,7 @@ services:
         $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.events    --partitions 6 --replication-factor 1 --config retention.ms=604800000
         $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.cancelled --partitions 3 --replication-factor 1 --config retention.ms=2592000000
         $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.scored    --partitions 6 --replication-factor 1 --config retention.ms=604800000
+        $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic document.analyzed     --partitions 3 --replication-factor 1 --config retention.ms=2592000000
         $$T --bootstrap-server kafka:9092 --list
     restart: "no"
 
@@ -148,6 +149,8 @@ services:
       OUTBOX_POLL_MS: ${OUTBOX_POLL_MS:-500}
       OUTBOX_BATCH: ${OUTBOX_BATCH:-100}
       BALANCE_CACHE_TTL: ${BALANCE_CACHE_TTL:-60}
+      DOCUMENT_HOLD_ON_STATUS: ${DOCUMENT_HOLD_ON_STATUS:-SUSPICIOUS}
+      DOCUMENT_HOLD_ON_REASONS: ${DOCUMENT_HOLD_ON_REASONS:-duplicate_document,amount_mismatch}
     depends_on:
       cockroachdb: { condition: service_healthy }
       kafka:       { condition: service_healthy }
@@ -210,6 +213,8 @@ services:
       QUANTUM_SERVICE_URL: http://quantum-service:3005
       KMS_SERVICE_URL: http://kms-service:3006
       FRAUD_SERVICE_URL: http://fraud-service:3007
+      DOCUMENT_CV_SERVICE_URL: http://document-cv-service:3008
+      UPLOAD_LIMIT: ${UPLOAD_LIMIT:-12mb}
     depends_on:
       identity-service: { condition: service_healthy }
       account-service:  { condition: service_healthy }
@@ -290,7 +295,45 @@ services:
       retries: 20
       start_period: 180s          # first boot trains the VQC
 
+  # ── Phase 7 — Document computer-vision (OCR, integrity, signature) ─
+  document-cv-service:
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/document-cv-service/Dockerfile }
+    ports: ["3008:3008"]
+    environment:
+      PORT: 3008
+      APP_ENV: ${NODE_ENV:-production}
+      JWT_SECRET: ${JWT_SECRET:-banque_super_secret_2026}
+      DB_HOST: ${DB_HOST:-cockroachdb}
+      DB_PORT: ${DB_PORT:-26257}
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_SSL: ${DB_SSL:-disable}
+      DB_NAME: fraud_db
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      DOCUMENT_TOPIC: document.analyzed
+      KMS_SERVICE_URL: http://kms-service:3006
+      DOCUMENT_STORE_DIR: /data/documents
+      DOCUMENT_MASTER_KEY: ${DOCUMENT_MASTER_KEY:-dev_only_master_key_change_me}
+      DOCUMENT_MAX_BYTES: ${DOCUMENT_MAX_BYTES:-10485760}
+      DOCUMENT_REVIEW_THRESHOLD: ${DOCUMENT_REVIEW_THRESHOLD:-0.30}
+      DOCUMENT_SUSPICIOUS_THRESHOLD: ${DOCUMENT_SUSPICIOUS_THRESHOLD:-0.70}
+      TESSERACT_LANGS: ${TESSERACT_LANGS:-eng+fra}
+    volumes:
+      - documents_data:/data/documents
+    depends_on:
+      cockroachdb: { condition: service_healthy }
+      kafka-init:  { condition: service_completed_successfully }
+      kms-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3008/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
 volumes:
   cockroach_data:
   kafka_data:
   fraud_models:
+  documents_data:

@@ -42,17 +42,28 @@ jobs:
         run: cd ${{ matrix.package }} && npm audit --omit=dev --audit-level=high || true
 
   python:
-    name: python / fraud-service
+    name: python / ${{ matrix.service }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: fraud-service
+            deps: pytest numpy scikit-learn flask PyJWT
+          - service: document-cv-service
+            deps: pytest numpy opencv-python-headless pillow pytesseract imagehash cryptography fastapi httpx PyJWT python-multipart
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install (unit-test subset)
-        run: pip install pytest numpy flask PyJWT
+      - name: System deps (Tesseract for the CV tests)
+        if: matrix.service == 'document-cv-service'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra
+      - name: Install
+        run: pip install ${{ matrix.deps }}
       - name: Test
-        run: cd services/fraud-service && python -m pytest tests -q
+        run: cd services/${{ matrix.service }} && python -m pytest tests -q
 
   frontends:
     name: frontends / lint + build

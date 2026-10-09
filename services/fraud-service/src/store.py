@@ -156,6 +156,19 @@ def stats():
     }
 
 
+def get_document_features(document_id: str) -> dict | None:
+    """CV feature vector written by document-cv-service (same fraud_db)."""
+    try:
+        rows = _exec("SELECT features FROM document_analyses WHERE document_id = %s", (document_id,))
+    except Exception as e:  # noqa: BLE001
+        log.warning("document lookup failed for %s: %s", document_id, e)
+        return None
+    if not rows:
+        return None
+    f = rows[0][0]
+    return f if isinstance(f, dict) else json.loads(f)
+
+
 def healthcheck() -> bool:
     try:
         _exec("SELECT 1")

@@ -14,13 +14,14 @@ const ACTIONS = [
 export default function OverviewPage({ onAction, onNavigate, user }) {
   const [balance, setBalance] = useState(null);
   const [recent, setRecent]   = useState(null);
+  const [holds, setHolds]     = useState([]);
   const [error, setError]     = useState(null);
   const [copied, setCopied]   = useState(false);
 
   const load = async () => {
     try {
-      const [b, t] = await Promise.all([api.get("/balance"), api.get("/transactions?limit=6")]);
-      setBalance(b.data); setRecent(t.data.transactions || []); setError(null);
+      const [b, t, h] = await Promise.all([api.get("/balance"), api.get("/transactions?limit=6"), api.get("/transactions/holds?status=PENDING_REVIEW").catch(() => ({ data: { holds: [] } }))]);
+      setBalance(b.data); setRecent(t.data.transactions || []); setHolds(h.data.holds || []); setError(null);
     } catch (e) { setError(errorMessage(e)); }
   };
   // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -61,6 +62,13 @@ export default function OverviewPage({ onAction, onNavigate, user }) {
           </div>
         </Card>
       </div>
+
+      {holds.length > 0 && (
+        <Alert tone="warn">
+          <b>{holds.length} transaction{holds.length > 1 ? "s" : ""} under review.</b> A supporting document is being verified by the bank;
+          no money has left your account. {holds.map(h => `${KIND_LABEL[h.kind] || h.kind} ${fmtMoney(h.request?.amount)} TND`).join(" · ")}
+        </Alert>
+      )}
 
       <Card>
         <div className="row" style={{ marginBottom: 6 }}>

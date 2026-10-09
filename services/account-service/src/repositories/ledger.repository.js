@@ -10,7 +10,7 @@ const OUTBOUND_TYPES = ["TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT"]
 async function insertEntry(client, entry) {
   const {
     id, transactionId, accountId, type, txType, amount,
-    balance_snapshot, reference, created_at, compensates = null, initiatedBy = null,
+    balance_snapshot, reference, created_at, compensates = null, initiatedBy = null, documentId = null,
   } = entry
 
   if (!["CREDIT", "DEBIT"].includes(type)) throw new Error(`Invalid entry type: ${type}`)
@@ -21,11 +21,11 @@ async function insertEntry(client, entry) {
   const { rows } = await client.query(
     `INSERT INTO ${T.ledger}
        (id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
-        reference, created_at, compensates, initiated_by)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        reference, created_at, compensates, initiated_by, document_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      RETURNING *`,
     [id || randomUUID(), transactionId, accountId, type, txType, String(amount),
-     String(balance_snapshot), reference || null, created_at || new Date(), compensates, initiatedBy]
+     String(balance_snapshot), reference || null, created_at || new Date(), compensates, initiatedBy, documentId]
   )
   return rows[0]
 }
@@ -55,7 +55,7 @@ async function findByTransactionId(client, transactionId) {
 async function findById(id, client) {
   const { rows } = await (client || pool).query(
     `SELECT id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
-            reference, compensates, initiated_by, created_at
+            reference, compensates, initiated_by, document_id, created_at
        FROM ${T.ledger} WHERE id = $1`,
     [id]
   )
