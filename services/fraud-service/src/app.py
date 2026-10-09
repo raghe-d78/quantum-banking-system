@@ -4,8 +4,11 @@ fraud-service entrypoint — Phase 4.
 Endpoints:
   GET  /health                       liveness + model versions
   GET  /fraud/stats                  counts per risk level + open alerts
-  GET  /fraud/alerts?limit=50        recent alerts
-  POST /fraud/score                  ad-hoc scoring (admin / debug)
+  GET  /fraud/alerts?limit=50&status=OPEN   recent alerts (staff)
+  POST /fraud/alerts/<tx>/dismiss    close an alert as benign (staff)
+  POST /fraud/score                  ad-hoc scoring (staff)
+
+All /fraud/* routes require a staff JWT (see auth.py).
 
 The Kafka consumer thread starts automatically when the Flask app boots,
 unless FRAUD_CONSUMER_ENABLED=false (used for unit tests).
@@ -16,13 +19,14 @@ import os
 import threading
 from datetime import datetime, timezone
 
-from flask import Flask, jsonify, request
+from flask import Flask, g, jsonify, request
 
 from . import baseline as baseline_mod
 from . import vqc      as vqc_mod
 from .features import FEATURE_SCHEMA_VERSION
 from .risk     import decide
-from .store    import healthcheck as db_healthcheck, get_redis, list_alerts, stats
+from .store    import healthcheck as db_healthcheck, get_redis, list_alerts, stats, resolve_alerts
+from .auth     import require_staff
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 log = logging.getLogger("fraud.app")
@@ -76,7 +80,14 @@ def health():
     )
 
 
+@app.get("/ready")
+def ready():
+    ok = db_healthcheck()
+    return jsonify(status="ready" if ok else "degraded"), (200 if ok else 503)
+
+
 @app.get("/fraud/stats")
+@require_staff
 def fraud_stats():
     try:
         s = stats()
@@ -90,20 +101,38 @@ def fraud_stats():
 
 
 @app.get("/fraud/alerts")
+@require_staff
 def fraud_alerts():
     try:
         limit = max(1, min(200, int(request.args.get("limit", "50"))))
-        return jsonify(alerts=list_alerts(limit))
+        return jsonify(alerts=list_alerts(limit, status=request.args.get("status"), risk=request.args.get("risk")))
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
+
+@app.post("/fraud/alerts/<transaction_id>/dismiss")
+@require_staff
+def dismiss_alert(transaction_id: str):
+    """Mark an alert as reviewed-and-benign without touching the ledger."""
+    try:
+        n = resolve_alerts(transaction_id=transaction_id, status="DISMISSED", resolved_by=g.user.get("userId"))
+        if n == 0:
+            return jsonify(ok=False, code="NOT_FOUND", message="No open alert for this transaction"), 404
+        return jsonify(ok=True, transactionId=transaction_id, status="DISMISSED", updated=n)
     except Exception as e:
         return jsonify(error=str(e)), 500
 
 
 @app.post("/fraud/score")
+@require_staff
 def fraud_score():
     """
-    Ad-hoc scoring. Body accepts either a transaction event or raw features.
+    Ad-hoc scoring. Body is a transaction-shaped event, optionally with
+    "documentId" (joined from document_analyses) or an inline "document"
+    feature dict (CV extension).
     {
-      "transactionId": "...", "accountId": "...", "amount": 1234, "timestamp": "..."
+      "transactionId": "...", "accountId": "...", "amount": 1234, "timestamp": "...",
+      "documentId": "..." | "document": {"tampering_score": 0.8, ...}
     }
     """
     body = request.get_json(silent=True) or {}
@@ -124,6 +153,7 @@ def fraud_score():
 
 
 @app.get("/fraud/model-info")
+@require_staff
 def model_info():
     return jsonify(
         baseline=BASELINE.metadata,

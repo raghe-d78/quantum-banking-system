@@ -1,37 +1,45 @@
 """
-Feature extraction (Phase 4.1).
+Feature extraction (Phase 4.1, extended to v2 by the CV extension).
 
-A single transaction event coming off the `transaction.events` Kafka topic is
-turned into a fixed-length numeric feature vector. Rolling-window features
-(`rolling_24h_count`, `rolling_24h_sum`) are computed from a Redis sorted set
-that is kept in true sliding-window form via ZADD + ZREMRANGEBYSCORE.
+A transaction event is turned into a fixed-length numeric vector:
+  7 transaction features  (amount, cyclic time, 24h Redis sliding window)
++ 1 has_document flag
++ 9 document-CV features  (document-cv-service, joined on event.documentId)
+= 17 features, FEATURE_SCHEMA_VERSION "fraud-features-v2".
 
-Feature schema is versioned so trained models and live inference always agree
-on shape/order. Bumping FEATURE_SCHEMA_VERSION requires retraining.
+Rolling-window features use a Redis sorted set (ZADD + ZREMRANGEBYSCORE).
+Bumping FEATURE_SCHEMA_VERSION forces load_or_train() to retrain both models.
 """
 from __future__ import annotations
 import math
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
 import numpy as np
 
-FEATURE_SCHEMA_VERSION = "fraud-features-v1"
-FEATURE_NAMES = [
+FEATURE_SCHEMA_VERSION = "fraud-features-v2"
+TX_FEATURE_NAMES = [
     "log1p_amount",
     "hour_sin", "hour_cos",
     "dow_sin",  "dow_cos",
     "rolling_24h_count",
     "log1p_rolling_24h_sum",
 ]
+CV_FEATURE_NAMES = [
+    "ocr_confidence", "amount_confidence", "document_quality", "tampering_score",
+    "signature_similarity", "layout_consistency", "amount_match", "date_validity", "duplicate_score",
+]
+# Neutral values when no document is attached (must match document-cv-service CV_NEUTRAL).
+CV_NEUTRAL = {"ocr_confidence": 0.0, "amount_confidence": 0.0, "document_quality": 0.0, "tampering_score": 0.0,
+              "signature_similarity": 0.5, "layout_consistency": 0.5, "amount_match": 0.5, "date_validity": 0.5, "duplicate_score": 0.0}
+FEATURE_NAMES = TX_FEATURE_NAMES + ["has_document"] + CV_FEATURE_NAMES
 FEATURE_DIM = len(FEATURE_NAMES)
+TX_DIM = len(TX_FEATURE_NAMES)
 
 WINDOW_SECONDS = 24 * 3600
 
 
 def _parse_timestamp(ts) -> datetime:
-    """Accept ISO8601 string or numeric epoch seconds. Default to now()."""
     if ts is None:
         return datetime.now(timezone.utc)
     if isinstance(ts, (int, float)):
@@ -43,8 +51,8 @@ def _parse_timestamp(ts) -> datetime:
         return datetime.now(timezone.utc)
 
 
-def vectorize(amount: float, ts, rolling_count: float, rolling_sum: float) -> np.ndarray:
-    """Pure transformation — no I/O, easy to unit test."""
+def vectorize_tx(amount: float, ts, rolling_count: float, rolling_sum: float) -> np.ndarray:
+    """Pure transformation of the 7 transaction features — no I/O."""
     dt = _parse_timestamp(ts)
     h_rad = 2 * math.pi * (dt.hour + dt.minute / 60.0) / 24.0
     d_rad = 2 * math.pi * dt.weekday() / 7.0
@@ -57,19 +65,21 @@ def vectorize(amount: float, ts, rolling_count: float, rolling_sum: float) -> np
     ], dtype=np.float64)
 
 
+def cv_vector(cv: dict | None) -> np.ndarray:
+    """[has_document] + 9 CV features; neutral when no document."""
+    if not cv:
+        return np.array([0.0] + [CV_NEUTRAL[n] for n in CV_FEATURE_NAMES], dtype=np.float64)
+    return np.array([1.0] + [float(cv.get(n, CV_NEUTRAL[n])) for n in CV_FEATURE_NAMES], dtype=np.float64)
+
+
+def vectorize(amount: float, ts, rolling_count: float, rolling_sum: float, cv: dict | None = None) -> np.ndarray:
+    return np.concatenate([vectorize_tx(amount, ts, rolling_count, rolling_sum), cv_vector(cv)])
+
+
 def update_window_and_extract(redis_client, account_id: str, transaction_id: str,
                               amount: float, ts) -> tuple[float, float]:
-    """
-    True 24h sliding window in Redis (sorted set keyed by tx timestamp).
-    Returns (count, sum) for the trailing 24h INCLUDING the current event.
-
-    Idempotent on (account_id, transaction_id) thanks to ZADD's set semantics.
-    A separate hash `fraud:rolling:{acc}:amounts` stores per-tx amounts so we
-    can compute the rolling sum exactly. Both keys auto-expire 25h after the
-    last write.
-    """
+    """True 24h sliding window in Redis. Returns (count, sum) INCLUDING the current event; idempotent on tx id."""
     if redis_client is None:
-        # graceful fallback for unit tests / first event
         return 1.0, float(amount)
 
     now_s = _parse_timestamp(ts).timestamp()
@@ -90,32 +100,28 @@ def update_window_and_extract(redis_client, account_id: str, transaction_id: str
     if members:
         amounts_raw = redis_client.hmget(hkey, members) or []
         total = sum(float(a) for a in amounts_raw if a is not None)
-        # tidy: drop hash fields that fell out of the window
         stale = redis_client.hkeys(hkey) or []
         stale = {(k.decode() if isinstance(k, bytes) else k) for k in stale} - set(members)
         if stale:
             redis_client.hdel(hkey, *stale)
         return float(len(members)), total
-
     return 1.0, float(amount)
 
 
-def build_features(redis_client, event: dict) -> tuple[np.ndarray, dict]:
-    """
-    Top-level entry point used by the Kafka consumer & /fraud/score endpoint.
-    `event` follows the `transaction.events` schema published by account-service.
-    """
+def build_features(redis_client, event: dict, cv: dict | None = None) -> tuple[np.ndarray, dict]:
+    """Top-level entry used by the Kafka consumer & /fraud/score. `cv` = document features (or None)."""
     account_id     = event.get("accountId") or "unknown"
     transaction_id = event.get("transactionId") or f"adhoc-{int(time.time()*1000)}"
     amount         = float(event.get("amount") or 0.0)
     ts             = event.get("timestamp")
 
     count, total = update_window_and_extract(redis_client, account_id, transaction_id, amount, ts)
-    vec          = vectorize(amount, ts, count, total)
+    vec          = vectorize(amount, ts, count, total, cv)
     diag         = {
-        "schemaVersion":        FEATURE_SCHEMA_VERSION,
-        "rolling_24h_count":    count,
-        "rolling_24h_sum":      total,
-        "feature_names":        FEATURE_NAMES,
+        "schemaVersion":     FEATURE_SCHEMA_VERSION,
+        "rolling_24h_count": count,
+        "rolling_24h_sum":   total,
+        "has_document":      bool(cv),
+        "feature_names":     FEATURE_NAMES,
     }
     return vec, diag

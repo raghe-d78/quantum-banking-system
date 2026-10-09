@@ -1,288 +1,187 @@
 // services/account-service/src/routes.js
-const express     = require("express")
-const router      = express.Router()
-const axios = require("axios")
+const express = require("express")
+const axios   = require("axios")
+const router  = express.Router()
+const { authenticate, requireAdmin, requireStaff, isStaff } = require("/shared/auth")
+const { E } = require("/shared/errors")
 const accountService = require("./account.service")
-const accountRepo = require("./account.repository")
-const { authenticate, requireAdmin, requireStaff } = require("./middleware/auth.middleware")
-const txService      = require("./transaction.service");
-const exportService  = require("./Export.service");
+const accountRepo    = require("./repositories/account.repository")
+const outboxRepo     = require("./repositories/outbox.repository")
+const txService      = require("./transaction.service")
+const exportService  = require("./Export.service")
+
 const IDENTITY_SERVICE_URL = process.env.IDENTITY_SERVICE_URL || "http://identity-service:3001"
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-const resolveStaffLookup = async (lookup, authHeader) => {
-  const directAccount = await accountRepo.findById(lookup)
-  if (directAccount) {
-    return { account: directAccount, user: null }
+// Wrap async handlers so thrown AppErrors reach the error middleware.
+const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
+
+const identity = (path, authHeader) =>
+  axios.get(`${IDENTITY_SERVICE_URL}${path}`, { headers: { Authorization: authHeader || "" }, timeout: 5000 })
+
+// Resolve a staff lookup value (account UUID, user UUID, username or email).
+async function resolveStaffLookup(lookup, authHeader) {
+  if (UUID_RE.test(lookup)) {
+    const direct = await accountRepo.findById(lookup)
+    if (direct) return { account: direct, user: null }
   }
-
   let data
-  try {
-    ({ data } = await axios.get(
-      `${IDENTITY_SERVICE_URL}/admin/users/lookup/${encodeURIComponent(lookup)}`,
-      { headers: authHeader }
-    ))
-  } catch (err) {
-    if (err.response?.status === 404) {
-      return null
-    }
-    throw err
-  }
-
+  try { ({ data } = await identity(`/admin/users/lookup/${encodeURIComponent(lookup)}`, authHeader)) }
+  catch (err) { if (err.response?.status === 404) return null; throw err }
   const user = data?.user
-  if (!user) {
-    return null
-  }
-
+  if (!user) return null
   const account = await accountRepo.findByUserId(user.id)
-  if (!account) {
-    return null
-  }
-
-  return { account, user }
+  return account ? { account, user } : null
 }
 
-// POST /accounts/create
-// Called internally by identity-service when a new customer is created
-// Body: { userId, currency? }
-router.post("/accounts/create", authenticate, requireAdmin, async (req, res) => {
-  try {
-    const result = await accountService.createAccount(req.body)
-    res.status(201).json(result)
-  } catch (err) {
-    console.error("Error in /accounts/create:", err)
-    res.status(400).json({ message: err.message })
-  }
-})
+// ── internal: identity-service creates the account for a new customer ──
+router.post("/accounts/create", authenticate, requireAdmin, wrap(async (req, res) => {
+  const result = await accountService.createAccount(req.body || {})
+  res.status(201).json(result)
+}))
 
-// GET /balance
-// Called by customer frontend — extracts userId from JWT
-router.get("/balance", authenticate, async (req, res) => {
-  try {
-    console.log("Getting balance for userId:", req.user.userId)
-    const result = await accountService.getBalance(req.user.userId)
-    res.json(result)
-  } catch (err) {
-    console.error("Error in /balance:", err)
-    res.status(404).json({ message: err.message })
-  }
-})
+// ── customer ──────────────────────────────────────────────────────
+router.get("/balance", authenticate, wrap(async (req, res) => {
+  res.json(await accountService.getBalance(req.user.userId))
+}))
 
+router.post("/withdraw", authenticate, wrap(async (req, res) => {
+  const { amount, note } = req.body || {}
+  res.json(await accountService.withdraw(req.user.userId, amount, note))
+}))
 
-// POST /deposit
-router.post("/deposit", authenticate, requireStaff, async (req, res) => {
-  try {
-    const { accountId, amount } = req.body
+router.post("/transfer", authenticate, wrap(async (req, res) => {
+  const { sourceAccountId, destinationAccountId, amount, reference } = req.body || {}
+  const result = await accountService.transfer(sourceAccountId, destinationAccountId, amount, {
+    reference, actor: req.user,
+  })
+  res.status(200).json({ success: true, data: result })
+}))
 
-    const result = await accountService.deposit(accountId, amount)
+// Recipient check before a transfer: only non-sensitive fields are returned.
+router.get("/accounts/verify/:accountId", authenticate, wrap(async (req, res) => {
+  const account = await accountRepo.findById(req.params.accountId)
+  if (!account) throw E.notFound("Account not found")
+  let name = null
+  try {
+    const { data } = await identity(`/users/${account.user_id}/display-name`, req.headers.authorization)
+    name = data?.name || null
+  } catch (_) { /* identity down → fall back to masked id */ }
+  res.json({
+    accountId: account.id,
+    name: name || `Account ${account.id.slice(0, 8)}`,
+    currency: account.currency,
+    status: account.status || "ACTIVE",
+  })
+}))
 
-    res.json(result)
-  } catch (err) {
-    console.error("Error in /deposit:", err)
-    res.status(400).json({
-      error: err.message
-    })
-  }
-})
-// POST /withdraw
-router.post("/withdraw", authenticate, async (req, res) => {
-  try {
-    const { amount, note } = req.body
-    const result = await accountService.withdraw(req.user.userId, amount, note)
-    res.json(result)
-  } catch (err) {
-    console.error("Error in /withdraw:", err)
-    res.status(400).json({
-      message: err.message
-    })
-  }
-})
-// POST /transfer
-router.post("/transfer", authenticate, async (req, res) => {
-  try {
-    const { sourceAccountId, destinationAccountId, amount, reference } = req.body;
-    
-    // Optional: override initiatedBy (default: authenticated user)
-    const initiatedBy = req.user?.role === "staff" ? req.user?.userId : null;
-    
-    const result = await accountService.transfer(
-      sourceAccountId,
-      destinationAccountId,
-      amount,
-      { reference, initiatedBy }
-    );
-    
-    res.status(200).json({
-      success: true,
-      data: result,
-    });
-    
-  } catch (err) {
-    console.error("Transfer error:", err.message);
-    
-    // Map errors to appropriate HTTP status codes
-    const status =
-      err.code === "DAILY_LIMIT_EXCEEDED" ? 429 :
-      err.message.includes("Insufficient funds") ? 400 :
-      err.message.includes("not found") ? 404 :
-      err.message.includes("Currency mismatch") ? 400 :
-      500;
-      
-    res.status(status).json({
-      success: false,
-      error: err.message,
-    });
-  }
-});
-// verify account's existence (used by staff frontend)
-router.get("/admin/accounts/:accountId", authenticate, requireStaff, async (req, res) => {
-  try {
-    console.log("Admin checking account ID:", req.params.accountId)
-    const resolved = await resolveStaffLookup(req.params.accountId, {
-      Authorization: req.headers.authorization || ""
-    })
+// ── payees (billers / merchants) ──────────────────────────────────
+router.get("/payees", authenticate, wrap(async (req, res) => {
+  const payees = await accountService.listPayees({ kind: req.query.kind })
+  res.json({ payees: payees.map(p => ({ code: p.code, name: p.name, kind: p.kind, category: p.category, referenceHint: p.reference_hint })) })
+}))
 
-    if (!resolved) {
-      return res.status(404).json({ message: "Account not found" })
-    }
+// ── unified transaction creation ──────────────────────────────────
+// Body: { kind: TRANSFER|BILL_PAYMENT|MERCHANT_PAYMENT|WITHDRAW, amount, … }
+// Optional header Idempotency-Key makes retries safe.
+router.post("/transactions", authenticate, wrap(async (req, res) => {
+  const key = req.get("Idempotency-Key") || null
+  const result = await accountService.createTransaction(req.user, req.body || {}, key)
+  res.status(result.replayed ? 200 : result.held ? 202 : 201).json({ success: true, data: result })
+}))
 
-    const { account, user } = resolved
-    res.json({
-      accountId: account.id,
-      userId: account.user_id,
-      username: user?.username,
-      name: user?.name || user?.username || "Customer",
-      currency: account.currency,
-      balance: Number(account.cached_balance),
-    })
-  } catch (err) {
-    console.error("Error in /admin/accounts/:accountId:", err)
-    res.status(400).json({ message: err.message })
-  }
-})
+// My held (suspended) transactions
+router.get("/transactions/holds", authenticate, wrap(async (req, res) => {
+  const holds = await accountService.listHolds({ status: req.query.status || null, userId: req.user.userId, limit: req.query.limit })
+  res.json({ holds, count: holds.length })
+}))
 
+// ── transactions (read side) ──────────────────────────────────────
+router.get("/transactions", authenticate, wrap(async (req, res) => {
+  const txs = await txService.listTransactions(req.user.userId, req.query)
+  res.json({ transactions: txs, count: txs.length })
+}))
 
-// ✅ Public endpoint for customers to verify recipient accounts
-router.get("/accounts/verify/:accountId", authenticate, async (req, res) => {
-  try {
-    const account = await accountRepo.findById(req.params.accountId);
-    
-    if (!account) {
-      return res.status(404).json({ message: "Account not found" });
-    }
-    
-    // Fetch user info from identity service if needed
-    let userInfo = null;
-    try {
-      const { data } = await axios.get(
-        `${process.env.IDENTITY_SERVICE_URL}/admin/users/${account.user_id}`,
-        { headers: { Authorization: req.headers.authorization } }
-      );
-      userInfo = data;
-    } catch (err) {
-      // Silently continue if identity service fails
-    }
-    
-    res.json({
-      accountId: account.id,
-      userId: account.user_id,
-      name: userInfo?.name || userInfo?.username || `Account ${account.id.slice(0, 8)}`,
-      currency: account.currency,
-    });
-    
-  } catch (err) {
-    console.error("Account verification error:", err);
-    res.status(500).json({ message: err.message });
+router.get("/transactions/export", authenticate, wrap(async (req, res) => {
+  const format = String(req.query.format ?? "csv").toLowerCase()
+  if (format === "csv") {
+    const csv = await exportService.exportCSV(req.user.userId, req.query)
+    res.setHeader("Content-Type", "text/csv; charset=utf-8")
+    res.setHeader("Content-Disposition", `attachment; filename="transactions_${Date.now()}.csv"`)
+    return res.send(csv)
   }
-});
+  if (format === "pdf") {
+    let userInfo = {}
+    try { ({ data: { user: userInfo } } = await identity("/auth/me", req.headers.authorization)) } catch (_) {}
+    const html = await exportService.exportPDF(req.user.userId, req.query, { name: userInfo?.name, email: userInfo?.email })
+    res.setHeader("Content-Type", "text/html; charset=utf-8")
+    res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
+    return res.send(html)
+  }
+  throw E.validation(`Unsupported format: ${format}. Use csv or pdf.`)
+}))
 
-// ── Transactions ───────────────────────────────────────────────────
-// GET /transactions?type=CREDIT&dateFrom=2026-01-01&dateTo=2026-03-31
-//                  &minAmount=100&maxAmount=500&initiatedBy=staff
-//                  &limit=20&offset=0&order=DESC
-router.get("/transactions", authenticate, async (req, res) => {
-  try {
-    const txs = await txService.listTransactions(req.user.userId, req.query);
-    res.json({ transactions: txs, count: txs.length });
-  } catch (err) {
-    res.status(404).json({ message: err.message });
-  }
-});
- 
-// GET /transactions/export?format=csv|pdf  (must be BEFORE /:id route)
-router.get("/transactions/export", authenticate, async (req, res) => {
-  const format = (req.query.format ?? "csv").toLowerCase();
- 
-  try {
-    if (format === "csv") {
-      const csv = await exportService.exportCSV(req.user.userId, req.query);
-      res.setHeader("Content-Type", "text/csv");
-      res.setHeader("Content-Disposition",
-        `attachment; filename="transactions_${Date.now()}.csv"`);
-      return res.send(csv);
-    }
- 
-    if (format === "pdf") {
-      const html = await exportService.exportPDF(
-        req.user.userId, req.query,
-        { name: req.user.name, email: req.user.email }
-      );
-      // Return HTML for browser print (client calls window.print())
-      res.setHeader("Content-Type", "text/html");
-      res.setHeader("Content-Disposition",
-        `inline; filename="statement_${Date.now()}.html"`);
-      return res.send(html);
-    }
- 
-    res.status(400).json({ message: `Unsupported format: ${format}. Use csv or pdf.` });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
- 
-// GET /transactions/:id
-router.get("/transactions/:id", authenticate, async (req, res) => {
-  try {
-    res.json({ transaction: await txService.getTransaction(req.user.userId, req.params.id) });
-  } catch (err) {
-    const status = err.message.includes("not found") ? 404
-                 : err.message.includes("denied")    ? 403 : 500;
-    res.status(status).json({ message: err.message });
-  }
-});
- 
-// ── Admin: lookup account by IBAN (for deposit page recipient verify) ──
-router.get("/admin/accounts/:id", authenticate, requireStaff, async (req, res) => {
-  try {
-    const account = await accountService.findAccountById(req.params.id);
-    res.json(account);
-  } catch (err) {
-    res.status(404).json({ message: err.message });
-  }
-});
+router.get("/transactions/:id", authenticate, wrap(async (req, res) => {
+  res.json({ transaction: await txService.getTransaction(req.user.userId, req.params.id) })
+}))
 
-// ── Phase 4.4 — Admin cancellation of a (fraudulent) transaction ──
-router.post("/admin/transactions/:id/cancel", authenticate, requireStaff, async (req, res) => {
-  try {
-    const reason = req.body?.reason
-    const result = await accountService.cancelTransaction(req.params.id, {
-      reason,
-      cancelledBy: req.user.userId,
-    })
-    res.status(200).json(result)
-  } catch (err) {
-    const status =
-      err.code === "ALREADY_CANCELLED" ? 409 :
-      err.code === "NOT_FOUND"         ? 404 :
-      err.code === "INVALID_TARGET"    ? 422 :
-      err.message?.includes("required") ? 400 : 500
-    const body = { ok: false, code: err.code || "ERR", message: err.message }
-    if (err.existing) body.existing = err.existing
-    res.status(status).json(body)
-  }
-})
- 
+// ── staff ─────────────────────────────────────────────────────────
+router.post("/deposit", authenticate, requireStaff, wrap(async (req, res) => {
+  const { accountId, amount, note } = req.body || {}
+  res.json(await accountService.deposit(accountId, amount, { actor: req.user, note }))
+}))
 
-// Health check
-router.get("/health", (req, res) => res.json({ status: "account-service running" }))
+router.get("/admin/accounts/:accountId", authenticate, requireStaff, wrap(async (req, res) => {
+  const resolved = await resolveStaffLookup(req.params.accountId, req.headers.authorization)
+  if (!resolved) throw E.notFound("Account not found")
+  const { account, user } = resolved
+  res.json({
+    accountId: account.id,
+    userId:    account.user_id,
+    username:  user?.username,
+    name:      user?.name || user?.username || "Customer",
+    currency:  account.currency,
+    status:    account.status || "ACTIVE",
+    balance:   Number(account.cached_balance),
+  })
+}))
+
+router.get("/admin/accounts/:accountId/transactions", authenticate, requireStaff, wrap(async (req, res) => {
+  const account = await accountRepo.findById(req.params.accountId)
+  if (!account) throw E.notFound("Account not found")
+  const txs = await txService.listForAccount(account.id, req.query)
+  res.json({ transactions: txs, count: txs.length })
+}))
+
+router.post("/admin/transactions/:id/cancel", authenticate, requireStaff, wrap(async (req, res) => {
+  const result = await accountService.cancelTransaction(req.params.id, {
+    reason: req.body?.reason, cancelledBy: req.user.userId,
+  })
+  res.status(200).json(result)
+}))
+
+// ── staff: document-risk holds ────────────────────────────────────
+router.get("/admin/holds", authenticate, requireStaff, wrap(async (req, res) => {
+  const holds = await accountService.listHolds({ status: req.query.status === "all" ? null : (req.query.status || "PENDING_REVIEW"), limit: req.query.limit })
+  res.json({ holds, count: holds.length })
+}))
+router.post("/admin/holds/:id/release", authenticate, requireStaff, wrap(async (req, res) => {
+  res.json(await accountService.decideHold(req.params.id, { action: "RELEASE", actor: req.user, note: req.body?.note }))
+}))
+router.post("/admin/holds/:id/reject", authenticate, requireStaff, wrap(async (req, res) => {
+  res.json(await accountService.decideHold(req.params.id, { action: "REJECT", actor: req.user, note: req.body?.note }))
+}))
+
+router.get("/admin/outbox/stats", authenticate, requireStaff, wrap(async (_req, res) => {
+  res.json(await outboxRepo.stats())
+}))
+
+// ── health ────────────────────────────────────────────────────────
+router.get("/health", (_req, res) => res.json({ status: "account-service running" }))
+router.get("/ready", wrap(async (_req, res) => {
+  await accountRepo.pool.query("SELECT 1")
+  res.json({ status: "ready" })
+}))
 
 module.exports = router
+module.exports._isStaff = isStaff

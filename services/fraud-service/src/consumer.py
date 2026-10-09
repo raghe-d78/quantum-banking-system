@@ -17,13 +17,14 @@ from datetime import datetime, timezone
 
 from .features import build_features, FEATURE_SCHEMA_VERSION
 from .risk     import decide
-from .store    import get_redis, insert_score, insert_alert
+from .store    import get_redis, insert_score, insert_alert, resolve_alerts, get_document_features
 
 log = logging.getLogger("fraud.consumer")
 
 KAFKA_BROKERS    = os.environ.get("KAFKA_BROKERS", "kafka:9092")
 TX_TOPIC         = os.environ.get("TX_EVENTS_TOPIC", "transaction.events")
 SCORED_TOPIC     = os.environ.get("TX_SCORED_TOPIC", "transaction.scored")
+CANCELLED_TOPIC  = os.environ.get("TX_CANCELLED_TOPIC", "transaction.cancelled")
 GROUP_ID         = os.environ.get("FRAUD_GROUP_ID", "fraud-workers")
 ENABLE_CONSUMER  = os.environ.get("FRAUD_CONSUMER_ENABLED", "true").lower() == "true"
 
@@ -59,12 +60,16 @@ class FraudWorker(threading.Thread):
             "session.timeout.ms": 30000,
         })
         self.producer = Producer({"bootstrap.servers": KAFKA_BROKERS})
-        self.consumer.subscribe([TX_TOPIC])
-        log.info("fraud-consumer subscribed to %s (group=%s)", TX_TOPIC, GROUP_ID)
+        self.consumer.subscribe([TX_TOPIC, CANCELLED_TOPIC])
+        log.info("fraud-consumer subscribed to %s + %s (group=%s)", TX_TOPIC, CANCELLED_TOPIC, GROUP_ID)
 
     def score_event(self, event: dict) -> dict:
         redis_client = get_redis()
-        feats, diag  = build_features(redis_client, event)
+        # CV extension: document features travel by reference (documentId) or inline (document).
+        cv = event.get("document") if isinstance(event.get("document"), dict) else None
+        if cv is None and event.get("documentId"):
+            cv = get_document_features(event["documentId"])
+        feats, diag  = build_features(redis_client, event, cv)
         c_score      = self.baseline.predict_proba(feats)
         q_score      = self.vqc.predict_proba(feats)
         verdict      = decide(c_score, q_score, self.baseline.metadata["modelVersion"], self.vqc.metadata["modelVersion"])
@@ -75,10 +80,23 @@ class FraudWorker(threading.Thread):
             schema_version=FEATURE_SCHEMA_VERSION,
         )
         scored["_features"] = {n: float(v) for n, v in zip(diag["feature_names"], feats)}
+        scored["documentId"] = event.get("documentId")
         scored["_diagnostics"] = {k: v for k, v in diag.items() if k != "feature_names"}
         return scored
 
+    def _handle_cancelled(self, event: dict):
+        """transaction.cancelled → close the OPEN alerts of the original transaction."""
+        original = event.get("originalTransactionId")
+        if not original:
+            return
+        n = resolve_alerts(transaction_id=original, status="CANCELLED", resolved_by=event.get("cancelledBy"))
+        if n:
+            log.info("fraud-consumer: closed %d alert(s) for cancelled tx=%s", n, original)
+        self.processed += 1
+
     def _handle(self, event: dict):
+        if event.get("type") == "TRANSACTION_CANCELLED":
+            return self._handle_cancelled(event)
         scored = self.score_event(event)
         tx_id  = event.get("transactionId", "")
         acc_id = event.get("accountId", "")
@@ -141,7 +159,14 @@ class FraudWorker(threading.Thread):
                 continue
             try:
                 event = json.loads(msg.value().decode())
-                self._handle(event)
+                if msg.topic() == CANCELLED_TOPIC:
+                    self._handle_cancelled(event)
+                else:
+                    self._handle(event)
+                self.consumer.commit(asynchronous=False)
+            except ValueError:
+                # poison (unparseable) message: never retryable → skip it
+                log.error("fraud-consumer: unparseable message skipped (topic=%s offset=%s)", msg.topic(), msg.offset())
                 self.consumer.commit(asynchronous=False)
             except Exception as e:
                 self.last_error = str(e)

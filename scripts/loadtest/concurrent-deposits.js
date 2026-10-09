@@ -5,13 +5,12 @@
 // Fires N concurrent deposits of 1 TND each against ACCOUNT_ID, then asserts:
 //   - HTTP 200 on every call
 //   - final balance == initial + N
-//   - audit-service /audit/recent contains N events for the account
+//   - /audit/stats (via gateway, staff token) reflects the new events
 //
 // Usage:
 //   ACCOUNT_ID=<uuid> node scripts/loadtest/concurrent-deposits.js [N]
 
 const GATEWAY    = process.env.GATEWAY    || "http://localhost:3000"
-const AUDIT      = process.env.AUDIT      || "http://localhost:3004"
 const ADMIN_USER = process.env.ADMIN_USER || "adminn"
 const ADMIN_PASS = process.env.ADMIN_PASS || "admin123"
 const ACCOUNT_ID = process.env.ACCOUNT_ID
@@ -67,7 +66,7 @@ async function jget(url, token) {
   const finalBal = Number(after.body?.balance ?? after.body?.data?.cached_balance ?? after.body?.cached_balance ?? 0)
   console.log(`  final balance = ${finalBal}  (expected ${initialBal + ok})`)
 
-  const audit = await jget(`${AUDIT}/audit/stats`)
+  const audit = await jget(`${GATEWAY}/audit/stats`, token)   // staff-only via the gateway
   console.log("audit stats:", audit.body)
 
   const balanceOK = Math.abs(finalBal - (initialBal + ok)) < 0.0001

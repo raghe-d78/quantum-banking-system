@@ -1,29 +1,25 @@
 {
   "name": "ledger-service",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "private": true,
   "scripts": {
     "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
     "test": "jest tests/unit tests/api",
-    "test:coverage": "jest tests/unit tests/api --coverage --collectCoverageFrom=src/**/*.js --coveragePathIgnorePatterns=src/server.js",
-    "dev": "nodemon src/server.js",
-    "test:integration": "jest tests/integration"
+    "test:coverage": "jest tests/unit tests/api --coverage --collectCoverageFrom=src/**/*.js --coveragePathIgnorePatterns=src/server.js"
   },
   "jest": {
-    "moduleNameMapper": {
-      "^/shared/(.*)$": "<rootDir>/../../shared/$1",
-      "^\\.\\./\\.\\./\\.\\./shared/(.*)$": "<rootDir>/../../shared/$1"
-    }
+    "testEnvironment": "node",
+    "moduleNameMapper": { "^/shared/(.*)$": "<rootDir>/../../shared/$1" }
   },
   "dependencies": {
-    "cors": "^2.8.6",
     "decimal.js": "^10.4.3",
-    "dotenv": "^16.0.0",
     "express": "^4.19.0",
-    "jsonwebtoken": "^9.0.0"
+    "jsonwebtoken": "^9.0.0",
+    "pg": "^8.20.0"
   },
   "devDependencies": {
     "jest": "^29.0.0",
-    "nodemon": "^3.1.14",
     "supertest": "^6.0.0"
   }
 }

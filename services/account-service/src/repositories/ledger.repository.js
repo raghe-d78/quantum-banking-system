@@ -1,69 +1,65 @@
 // services/account-service/src/repositories/ledger.repository.js
+// Append-only. There is deliberately no UPDATE/DELETE here.
+const { randomUUID } = require("crypto")
+const { pool, T } = require("./pool")
 
-const { randomUUID: uuidv4 } = require("crypto");
-const createPool = require("../../../shared/db");
-const pool = createPool("ledger_db"); // ✅ Your separate ledger database
+const TX_TYPES = ["DEPOSIT", "WITHDRAW", "TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT", "CANCELLATION"]
+// Customer-initiated outbound kinds that count against the daily cap.
+const OUTBOUND_TYPES = ["TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT"]
 
 async function insertEntry(client, entry) {
-  // ✅ DESTRUCTURE EXACTLY WHAT THE SERVICE SENDS
   const {
-    id,
-    transactionId,
-    accountId,
-    type,
-    amount,
-    balance_snapshot,  // ← Changed from 'balance' to match service
-    reference,
-    
-    created_at,
-  } = entry;
+    id, transactionId, accountId, type, txType, amount,
+    balance_snapshot, reference, created_at, compensates = null, initiatedBy = null, documentId = null,
+  } = entry
 
-  //  CRITICAL VALIDATION (catches undefined/null/NaN before DB hits)
-  if (balance_snapshot === undefined || balance_snapshot === null || isNaN(balance_snapshot)) {
-    console.error("❌ balance_snapshot is invalid:", balance_snapshot);
-    console.error("Full entry received:", entry);
-    throw new Error("balance_snapshot must be a valid number");
-  }
+  if (!["CREDIT", "DEBIT"].includes(type)) throw new Error(`Invalid entry type: ${type}`)
+  if (!TX_TYPES.includes(txType))          throw new Error(`Invalid tx_type: ${txType}`)
+  if (balance_snapshot === undefined || balance_snapshot === null || Number.isNaN(Number(balance_snapshot)))
+    throw new Error("balance_snapshot must be a valid number")
 
-  const query = `
-    INSERT INTO ledger_entries 
-    (id, transaction_id, account_id, type, amount, balance_snapshot, reference, created_at)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-    RETURNING *
-  `;
-
-  const values = [
-    id || uuidv4(),
-    transactionId,
-    accountId,
-    type,
-    Number(amount),
-    Number(balance_snapshot), // ✅ Force to number
-    reference || null,
-   
-    created_at || new Date(),
-  ];
-
-  try {
-    const { rows } = await client.query(query, values);
-    return rows[0];
-  } catch (err) {
-    console.error("❌ Ledger Insert Failed:", err.message);
-    console.error("Values:", values);
-    throw err;
-  }
+  const { rows } = await client.query(
+    `INSERT INTO ${T.ledger}
+       (id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
+        reference, created_at, compensates, initiated_by, document_id)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     RETURNING *`,
+    [id || randomUUID(), transactionId, accountId, type, txType, String(amount),
+     String(balance_snapshot), reference || null, created_at || new Date(), compensates, initiatedBy, documentId]
+  )
+  return rows[0]
 }
 
-async function sumDebitsSince(client, accountId, sinceIso) {
+// Rolling-window sum of outbound debits (transfers + payments). Deposits,
+// withdrawals and compensations must not eat into the customer's allowance.
+async function sumTransferDebitsSince(client, accountId, sinceIso) {
   const { rows } = await client.query(
     `SELECT COALESCE(SUM(amount), 0)::STRING AS total
-       FROM ledger_entries
-      WHERE account_id = $1
-        AND type = 'DEBIT'
-        AND created_at >= $2`,
-    [accountId, sinceIso]
-  );
-  return rows[0]?.total ?? "0";
+       FROM ${T.ledger}
+      WHERE account_id = $1 AND type = 'DEBIT' AND tx_type = ANY($3)
+        AND compensates IS NULL AND created_at >= $2`,
+    [accountId, sinceIso, OUTBOUND_TYPES]
+  )
+  return rows[0]?.total ?? "0"
 }
 
-module.exports = { pool, insertEntry, sumDebitsSince };
+async function findByTransactionId(client, transactionId) {
+  const { rows } = await client.query(
+    `SELECT id, account_id, type, tx_type, amount, reference, compensates
+       FROM ${T.ledger} WHERE transaction_id = $1 ORDER BY account_id ASC`,
+    [transactionId]
+  )
+  return rows
+}
+
+async function findById(id, client) {
+  const { rows } = await (client || pool).query(
+    `SELECT id, transaction_id, account_id, type, tx_type, amount, balance_snapshot,
+            reference, compensates, initiated_by, document_id, created_at
+       FROM ${T.ledger} WHERE id = $1`,
+    [id]
+  )
+  return rows[0]
+}
+
+module.exports = { pool, TX_TYPES, OUTBOUND_TYPES, insertEntry, sumTransferDebitsSince, findByTransactionId, findById }

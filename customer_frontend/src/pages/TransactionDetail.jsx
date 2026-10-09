@@ -5,19 +5,35 @@ import api from "../lib/api";
 
 // Theme colors are now in App.css as CSS variables and utility classes
 
-// ─── Mock data (remove when backend is ready) ────────────────────
-const MOCK_TRANSACTIONS = [
-  { id:1,  date:"20 Mar 2026", time:"09:14:32", label:"Salary — STEG",               reference:"SAL-2026-03", type:"credit",  amount:3200.000, currency:"TND", status:"completed", category:"Income",      fromAccount:"STEG Payroll",                 toAccount:"TN59 1000 6035 1835 9847 8831", note:"Monthly salary — March 2026",        fee:0.000 },
-  { id:2,  date:"19 Mar 2026", time:"14:22:10", label:"Carrefour Market",             reference:"POS-884421",  type:"debit",   amount:87.500,   currency:"TND", status:"completed", category:"Shopping",    fromAccount:"TN59 1000 6035 1835 9847 8831", toAccount:"Carrefour Market — Tunis",      note:"",                                   fee:0.000 },
-  { id:3,  date:"18 Mar 2026", time:"00:00:00", label:"Netflix Subscription",         reference:"NET-0031",    type:"debit",   amount:29.990,   currency:"TND", status:"completed", category:"Subscription", fromAccount:"TN59 1000 6035 1835 9847 8831", toAccount:"Netflix International",         note:"Monthly plan — auto renewal",        fee:0.000 },
-  { id:4,  date:"17 Mar 2026", time:"11:05:47", label:"Transfer — Sarra Ben Ali",     reference:"TRF-20093",   type:"credit",  amount:500.000,  currency:"TND", status:"completed", category:"Transfer",    fromAccount:"Sarra Ben Ali",                toAccount:"TN59 1000 6035 1835 9847 8831", note:"Shared expenses",                    fee:0.000 },
-  { id:5,  date:"15 Mar 2026", time:"08:33:00", label:"Topnet Internet Bill",         reference:"BILL-9921",   type:"debit",   amount:59.000,   currency:"TND", status:"completed", category:"Bill",        fromAccount:"TN59 1000 6035 1835 9847 8831", toAccount:"Topnet",                        note:"Contract #TN-88421",                 fee:0.000 },
-  { id:6,  date:"14 Mar 2026", time:"16:45:12", label:"ATM Withdrawal — Tunis",       reference:"ATM-00441",   type:"debit",   amount:200.000,  currency:"TND", status:"completed", category:"Withdrawal",  fromAccount:"TN59 1000 6035 1835 9847 8831", toAccount:"ATM — Avenue Habib Bourguiba",  note:"",                                   fee:1.000 },
-  { id:7,  date:"12 Mar 2026", time:"18:02:55", label:"Freelance Payment — Aziz",     reference:"FRL-5512",    type:"credit",  amount:1800.000, currency:"TND", status:"completed", category:"Income",      fromAccount:"Aziz Khalil",                  toAccount:"TN59 1000 6035 1835 9847 8831", note:"Web project milestone #2",           fee:0.000 },
-  { id:8,  date:"10 Mar 2026", time:"10:00:00", label:"Rent — Appartement Lac",       reference:"RENT-0301",   type:"debit",   amount:850.000,  currency:"TND", status:"completed", category:"Housing",     fromAccount:"TN59 1000 6035 1835 9847 8831", toAccount:"Propriétaire — Appartement Lac", note:"March 2026 rent",                   fee:0.000 },
-  { id:9,  date:"09 Mar 2026", time:"07:15:00", label:"SONEDE Water Bill",            reference:"BILL-7743",   type:"debit",   amount:32.500,   currency:"TND", status:"completed", category:"Bill",        fromAccount:"TN59 1000 6035 1835 9847 8831", toAccount:"SONEDE",                        note:"Contract #SND-44219",                fee:0.000 },
-  { id:10, date:"08 Mar 2026", time:"13:28:44", label:"Ooredoo Recharge",             reference:"RCH-2281",    type:"debit",   amount:20.000,   currency:"TND", status:"completed", category:"Telecom",     fromAccount:"TN59 1000 6035 1835 9847 8831", toAccount:"Ooredoo — +216 55 123 456",     note:"",                                   fee:0.000 },
-];
+// ─── Backend → view model ─────────────────────────────────────────
+// GET /transactions/:id returns the ledger row for the caller's own account:
+// { id, transactionId, accountId, type: CREDIT|DEBIT, txType, amount,
+//   balanceSnapshot, reference, compensates, createdAt, initiatedBy }
+const TX_TYPE_LABEL = { DEPOSIT:"Deposit", WITHDRAW:"Withdrawal", TRANSFER:"Transfer", BILL_PAYMENT:"Bill payment", MERCHANT_PAYMENT:"Purchase", CANCELLATION:"Reversal" };
+const toViewModel = (t) => {
+  const created = new Date(t.createdAt);
+  const type = String(t.type).toLowerCase() === "credit" ? "credit" : "debit";
+  const kind = TX_TYPE_LABEL[t.txType] ?? t.txType ?? "Transaction";
+  return {
+    id: t.id,
+    transactionId: t.transactionId,
+    date: created.toLocaleDateString("en-GB", { day:"2-digit", month:"short", year:"numeric" }),
+    time: created.toLocaleTimeString("en-GB", { hour:"2-digit", minute:"2-digit", second:"2-digit" }),
+    label: t.reference || kind,
+    reference: t.transactionId,
+    type,
+    amount: Number(t.amount),
+    balanceSnapshot: Number(t.balanceSnapshot),
+    currency: "TND",
+    status: t.txType === "CANCELLATION" ? "reversed" : "completed",
+    category: kind,
+    fromAccount: type === "debit" ? t.accountId : (t.reference || kind),
+    toAccount:   type === "debit" ? (t.reference || kind) : t.accountId,
+    note: t.reference || "",
+    initiatedBy: t.initiatedBy,
+    fee: 0,
+  };
+};
 
 // ─── Helpers ─────────────────────────────────────────────────────
 const fmt = (n) => Math.abs(n).toLocaleString("fr-TN", { minimumFractionDigits: 3 });
@@ -26,6 +42,7 @@ const STATUS_CFG = {
   completed: { label:"Completed", color:"var(--color-green)", bg:"var(--color-green-bg)", icon:"✓" },
   pending:   { label:"Pending",   color:"#d97706", bg:"rgba(217,119,6,0.10)",  icon:"◐" },
   failed:    { label:"Failed",    color:"var(--color-red)", bg:"var(--color-red-bg)",  icon:"✕" },
+  reversed:  { label:"Reversal",  color:"#1d4ed8", bg:"rgba(29,78,216,0.08)", icon:"↺" },
 };
 
 const TYPE_CFG = {
@@ -85,13 +102,11 @@ const TransactionDetail = () => {
     (async () => {
       try {
         setLoading(true);
-        // TODO: replace mock with: const { data } = await api.get(`/transactions/${id}`);
-        await new Promise((res) => setTimeout(res, 400));
-        const found = MOCK_TRANSACTIONS.find((t) => String(t.id) === String(id));
-        if (!found) throw new Error("Transaction not found.");
-        setTx(found);
+        const { data } = await api.get(`/transactions/${id}`);
+        if (!data?.transaction) throw new Error("Transaction not found.");
+        setTx(toViewModel(data.transaction));
       } catch (err) {
-        setError(err.message ?? "Failed to load transaction.");
+        setError(err.response?.data?.message ?? err.message ?? "Failed to load transaction.");
       } finally {
         setLoading(false);
       }

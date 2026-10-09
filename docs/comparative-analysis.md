@@ -84,13 +84,17 @@ hyperparameters it is **not yet a useful classifier on its own**.
 
 ### Decision policy in production
 
-The fraud-service uses `decision = max(classical, quantum)` — the
-quantum score acts as a "safety net" that can flag a transaction the
-classical model is uncertain about, at zero risk to precision because
-the classical score still dominates. With the current VQC quality this
-is mostly cosmetic, but the architecture is in place so improving the
-VQC (more qubits, more repetitions, longer training, real hardware) is
-a drop-in upgrade — no consumer / event-schema change required.
+The fraud-service originally used `decision = max(classical, quantum)`.
+Running the full pipeline end-to-end showed why that is wrong for a model
+at AUC ≈ 0.5: the VQC emits ≈ 0.5 for almost every transaction, so `max()`
+labelled *every* transaction "High" and the alert feed became noise.
+Phase 6.1 switched to a weighted blend,
+`decision = 0.7 × classical + 0.3 × quantum` (`FRAUD_QUANTUM_WEIGHT`).
+A confident quantum verdict can still lift a borderline classical one
+(0.40 / 0.95 → High), while an uninformative one cannot flag clean traffic
+(0.02 / 0.50 → Low). Both raw scores remain on every `transaction.scored`
+event, so the weight can be raised as the VQC improves — no consumer or
+event-schema change required.
 
 ## How to reproduce
 
@@ -100,10 +104,10 @@ cd infrastructure
 docker compose up -d
 
 # 2. Wait for fraud-service to train (look for "VQC ready" in logs)
-docker logs infrastructure-fraud-service-1 --tail 30
+docker logs qbs-fraud-service-1 --tail 30
 
 # 3. Run the comparison
-docker exec -w /app infrastructure-fraud-service-1 \
+docker exec -w /app qbs-fraud-service-1 \
     python -m src.eval_compare
 ```
 

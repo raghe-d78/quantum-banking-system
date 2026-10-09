@@ -70,3 +70,7 @@ node_modules
 .env
 dist
 coverage
+# e2e artefacts
+scripts/e2e/shots/
+scripts/e2e/node_modules/
+scripts/e2e/samples/

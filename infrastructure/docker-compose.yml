@@ -1,39 +1,71 @@
+# ──────────────────────────────────────────────────────────────────
+# Quantum Banking System — base stack (dev + CI).
+#   dev:  docker compose up -d --build
+#   prod: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# All secrets come from infrastructure/.env (see .env.example).
+# ──────────────────────────────────────────────────────────────────
+name: qbs
+
+x-node-health: &node-health
+  interval: 10s
+  timeout: 5s
+  retries: 12
+  start_period: 20s
+
+x-service-defaults: &service-defaults
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+x-common-env: &common-env
+  NODE_ENV: ${NODE_ENV:-production}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  JWT_SECRET: ${JWT_SECRET:-banque_super_secret_2026}
+  DB_HOST: ${DB_HOST:-cockroachdb}
+  DB_PORT: ${DB_PORT:-26257}
+  DB_USER: ${DB_USER:-root}
+  DB_PASSWORD: ${DB_PASSWORD:-}
+  DB_SSL: ${DB_SSL:-disable}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+  KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+
 services:
 
+  # ── Data: CockroachDB (single node; scale with `cockroach start` peers) ─
   cockroachdb:
-    image: cockroachdb/cockroach
-    command: start-single-node --insecure
+    <<: *service-defaults
+    image: cockroachdb/cockroach:v24.1.0
     container_name: cockroachdb
+    command: start-single-node --insecure --cache=.25 --max-sql-memory=.25
     ports:
       - "26257:26257"
       - "8080:8080"
     volumes:
-      - ../scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+      - cockroach_data:/cockroach/cockroach-data
+      - ../scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
     healthcheck:
       test: ["CMD", "cockroach", "sql", "--insecure", "--execute=SELECT 1"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
 
-  # ── Phase 2.1 — Redis (read cache + rate-limit store + pub/sub) ─
+  # ── Cache / rate-limit store / pub-sub ───────────────────────────
   redis:
+    <<: *service-defaults
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    command: ["redis-server", "--appendonly", "no", "--save", "", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-  # ── Phase 1.1 — Event backbone (Kafka, KRaft mode) ──────────────
-  # Spec §11 mentioned Zookeeper, but Apache Kafka 3.7 ships KRaft as
-  # the supported mode and Bitnami/Zookeeper images are no longer pulled
-  # cleanly behind some networks. KRaft is functionally equivalent for
-  # the spec's "Zone 2 event-driven bus" goal — single broker, single
-  # controller, auto-creation of topics enabled.
+  # ── Event backbone: Apache Kafka (KRaft, single broker) ──────────
   kafka:
+    <<: *service-defaults
     image: apache/kafka:3.7.0
     ports:
       - "9093:9093"
@@ -49,10 +81,12 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"      # topics are created explicitly by kafka-init
       KAFKA_NUM_PARTITIONS: 3
-      KAFKA_LOG_RETENTION_HOURS: 168                # 7d, per ROADMAP
+      KAFKA_LOG_RETENTION_HOURS: 168
       CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+    volumes:
+      - kafka_data:/tmp/kraft-combined-logs
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
@@ -60,178 +94,246 @@ services:
       retries: 30
       start_period: 30s
 
-  # One-shot job that explicitly creates the canonical topics with the
-  # right partition/retention settings.
   kafka-init:
     image: apache/kafka:3.7.0
     depends_on:
-      kafka:
-        condition: service_healthy
-    entrypoint: ["/bin/bash","-c"]
+      kafka: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
     command:
-      - "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.events --partitions 3 --replication-factor 1 --config retention.ms=604800000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic audit.logs --partitions 1 --replication-factor 1 --config retention.ms=2592000000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.scored --partitions 3 --replication-factor 1 --config retention.ms=604800000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.cancelled --partitions 3 --replication-factor 1 --config retention.ms=2592000000 && /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list"
+      - |
+        set -e
+        T=/opt/kafka/bin/kafka-topics.sh
+        $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.events    --partitions 6 --replication-factor 1 --config retention.ms=604800000
+        $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.cancelled --partitions 3 --replication-factor 1 --config retention.ms=2592000000
+        $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic transaction.scored    --partitions 6 --replication-factor 1 --config retention.ms=604800000
+        $$T --bootstrap-server kafka:9092 --create --if-not-exists --topic document.analyzed     --partitions 3 --replication-factor 1 --config retention.ms=2592000000
+        $$T --bootstrap-server kafka:9092 --list
     restart: "no"
 
+  # ── Core services ─────────────────────────────────────────────────
   identity-service:
-    build:
-      context: ..
-      dockerfile: services/identity-service/Dockerfile
-    ports:
-      - "3001:3001"
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/identity-service/Dockerfile }
+    ports: ["3001:3001"]
     environment:
-      - PORT=3001
-      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
-      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-banque_refresh_secret_2026}
-      - JWT_EXPIRES=${JWT_EXPIRES:-24h}
-      - JWT_REFRESH_EXPIRES=${JWT_REFRESH_EXPIRES:-7d}
-      - DB_HOST=${DB_HOST:-cockroachdb}
-      - DB_PORT=${DB_PORT:-26257}
-      - DB_NAME=identity_db
-      - ACCOUNT_SERVICE_URL=http://account-service:3002
+      <<: *common-env
+      PORT: 3001
+      SERVICE_NAME: identity-service
+      DB_NAME: identity_db
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-banque_refresh_secret_2026}
+      JWT_EXPIRES: ${JWT_EXPIRES:-15m}
+      JWT_REFRESH_EXPIRES: ${JWT_REFRESH_EXPIRES:-7d}
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS:-12}
+      ACCOUNT_SERVICE_URL: http://account-service:3002
     depends_on:
-      cockroachdb:
-        condition: service_healthy
+      cockroachdb: { condition: service_healthy }
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
   account-service:
-    build:
-      context: ..
-      dockerfile: services/account-service/Dockerfile
-    ports:
-      - "3002:3002"
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/account-service/Dockerfile }
+    ports: ["3002:3002"]
     environment:
-      - PORT=3002
-      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
-      - DB_HOST=${DB_HOST:-cockroachdb}
-      - DB_PORT=${DB_PORT:-26257}
-      - DB_NAME=account_db
-      - DAILY_TRANSFER_LIMIT_TND=${DAILY_TRANSFER_LIMIT_TND:-10000}
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TX_EVENTS_TOPIC=transaction.events
-      - OUTBOX_POLL_MS=500
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
-      - BALANCE_CACHE_TTL=${BALANCE_CACHE_TTL:-60}
+      <<: *common-env
+      PORT: 3002
+      SERVICE_NAME: account-service
+      DB_NAME: ledger_db
+      DB_POOL_MAX: ${ACCOUNT_DB_POOL_MAX:-20}
+      IDENTITY_SERVICE_URL: http://identity-service:3001
+      DAILY_TRANSFER_LIMIT_TND: ${DAILY_TRANSFER_LIMIT_TND:-10000}
+      MAX_TX_AMOUNT: ${MAX_TX_AMOUNT:-1000000}
+      TX_EVENTS_TOPIC: transaction.events
+      TX_CANCELLED_TOPIC: transaction.cancelled
+      OUTBOX_POLL_MS: ${OUTBOX_POLL_MS:-500}
+      OUTBOX_BATCH: ${OUTBOX_BATCH:-100}
+      BALANCE_CACHE_TTL: ${BALANCE_CACHE_TTL:-60}
+      DOCUMENT_HOLD_ON_STATUS: ${DOCUMENT_HOLD_ON_STATUS:-SUSPICIOUS}
+      DOCUMENT_HOLD_ON_REASONS: ${DOCUMENT_HOLD_ON_REASONS:-duplicate_document,amount_mismatch}
     depends_on:
-      cockroachdb:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  # ── Phase 1.3 — Audit worker (Kafka consumer → audit_logs) ───────
-  audit-service:
-    build:
-      context: ..
-      dockerfile: services/audit-service/Dockerfile
-    ports:
-      - "3004:3004"
-    environment:
-      - PORT=3004
-      - DB_HOST=${DB_HOST:-cockroachdb}
-      - DB_PORT=${DB_PORT:-26257}
-      - DB_NAME=audit_db
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TX_EVENTS_TOPIC=transaction.events
-      - AUDIT_GROUP_ID=audit-workers
-    depends_on:
-      cockroachdb:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
+      cockroachdb: { condition: service_healthy }
+      kafka:       { condition: service_healthy }
+      redis:       { condition: service_healthy }
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3002/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
   ledger-service:
-    build:
-      context: ..
-      dockerfile: services/ledger-service/Dockerfile
-    ports:
-      - "3003:3003"
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/ledger-service/Dockerfile }
+    ports: ["3003:3003"]
     environment:
-      - PORT=3003
-      - DB_HOST=${DB_HOST:-cockroachdb}
-      - DB_PORT=${DB_PORT:-26257}
-      - DB_NAME=ledger_db
+      <<: *common-env
+      PORT: 3003
+      SERVICE_NAME: ledger-service
+      DB_NAME: ledger_db
     depends_on:
-      cockroachdb:
-        condition: service_healthy
+      cockroachdb: { condition: service_healthy }
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3003/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+  audit-service:
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/audit-service/Dockerfile }
+    ports: ["3004:3004"]
+    environment:
+      <<: *common-env
+      PORT: 3004
+      SERVICE_NAME: audit-service
+      DB_NAME: audit_db
+      TX_EVENTS_TOPIC: transaction.events
+      TX_CANCELLED_TOPIC: transaction.cancelled
+      AUDIT_GROUP_ID: audit-workers
+    depends_on:
+      cockroachdb: { condition: service_healthy }
+      kafka:       { condition: service_healthy }
+      kafka-init:  { condition: service_completed_successfully }
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3004/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
   api-gateway:
-    build: ../services/api-gateway
-    ports:
-      - "3000:3000"
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/api-gateway/Dockerfile }
+    ports: ["3000:3000"]
     environment:
-      - JWT_SECRET=${JWT_SECRET:-banque_super_secret_2026}
-      - CORS_ORIGIN=${CORS_ORIGIN:-http://localhost:5173,http://localhost:5174}
-      - IDENTITY_SERVICE_URL=http://identity-service:3001
-      - ACCOUNT_SERVICE_URL=http://account-service:3002
-      - QUANTUM_SERVICE_URL=http://quantum-service:3005
-      - KMS_SERVICE_URL=http://kms-service:3006
-      - FRAUD_SERVICE_URL=http://fraud-service:3007
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      <<: *common-env
+      PORT: 3000
+      SERVICE_NAME: api-gateway
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173,http://localhost:5174}
+      AUTH_RL_MAX: ${AUTH_RL_MAX:-20}
+      API_RL_MAX: ${API_RL_MAX:-300}
+      IDENTITY_SERVICE_URL: http://identity-service:3001
+      ACCOUNT_SERVICE_URL: http://account-service:3002
+      LEDGER_SERVICE_URL: http://ledger-service:3003
+      AUDIT_SERVICE_URL: http://audit-service:3004
+      QUANTUM_SERVICE_URL: http://quantum-service:3005
+      KMS_SERVICE_URL: http://kms-service:3006
+      FRAUD_SERVICE_URL: http://fraud-service:3007
+      DOCUMENT_CV_SERVICE_URL: http://document-cv-service:3008
+      UPLOAD_LIMIT: ${UPLOAD_LIMIT:-12mb}
     depends_on:
-      - identity-service
-      - account-service
-      - redis
+      identity-service: { condition: service_healthy }
+      account-service:  { condition: service_healthy }
+      redis:            { condition: service_healthy }
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-  # ── Phase 3 — Quantum compute (QRNG + BB84 + circuit viz) ───────
-  # Python/Qiskit service. Defaults to local Aer simulator (free, instant).
-  # IBM Quantum hardware can be enabled by setting QUANTUM_BACKEND=ibm
-  # AND providing IBM_QUANTUM_TOKEN + IBM_QUANTUM_CRN via .env (gitignored).
+  # ── Quantum layer ─────────────────────────────────────────────────
   quantum-service:
-    build:
-      context: ..
-      dockerfile: services/quantum-service/Dockerfile
-    ports:
-      - "3005:3005"
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/quantum-service/Dockerfile }
+    ports: ["3005:3005"]
     environment:
-      - PORT=3005
-      - QUANTUM_BACKEND=${QUANTUM_BACKEND:-simulator}
-      - QRNG_BUFFER_BYTES=${QRNG_BUFFER_BYTES:-4096}
-      - IBM_QUANTUM_TOKEN=${IBM_QUANTUM_TOKEN:-}
-      - IBM_QUANTUM_CRN=${IBM_QUANTUM_CRN:-}
+      PORT: 3005
+      QUANTUM_BACKEND: ${QUANTUM_BACKEND:-simulator}
+      QRNG_BUFFER_BYTES: ${QRNG_BUFFER_BYTES:-4096}
+      IBM_QUANTUM_TOKEN: ${IBM_QUANTUM_TOKEN:-}
+      IBM_QUANTUM_CRN: ${IBM_QUANTUM_CRN:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3005/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
 
-  # ── Phase 3.4 — Key Management Service (BB84-derived AES-256-GCM) ─
   kms-service:
-    build:
-      context: ..
-      dockerfile: services/kms-service/Dockerfile
-    ports:
-      - "3006:3006"
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/kms-service/Dockerfile }
+    ports: ["3006:3006"]
     environment:
-      - PORT=3006
-      - QUANTUM_SERVICE_URL=http://quantum-service:3005
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
-      - KEY_TTL_SEC=${KEY_TTL_SEC:-300}
-      - KEY_ROUNDS=${KEY_ROUNDS:-3}
-      - KEY_QUBITS=${KEY_QUBITS:-1024}
+      <<: *common-env
+      PORT: 3006
+      SERVICE_NAME: kms-service
+      QUANTUM_SERVICE_URL: http://quantum-service:3005
+      KEY_TTL_SEC: ${KEY_TTL_SEC:-300}
+      KEY_ROUNDS: ${KEY_ROUNDS:-3}
+      KEY_QUBITS: ${KEY_QUBITS:-1024}
     depends_on:
-      redis:
-        condition: service_healthy
-      quantum-service:
-        condition: service_started
+      redis:           { condition: service_healthy }
+      quantum-service: { condition: service_healthy }
+    healthcheck:
+      <<: *node-health
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3006/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
 
-  # ── Phase 4 — Fraud detection (classical baseline + quantum VQC) ─
-  # Consumes transaction.events, scores with both models, publishes
-  # transaction.scored, persists Critical/High verdicts to fraud_db.
   fraud-service:
-    build:
-      context: ..
-      dockerfile: services/fraud-service/Dockerfile
-    ports:
-      - "3007:3007"
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/fraud-service/Dockerfile }
+    ports: ["3007:3007"]
     environment:
-      - PORT=3007
-      - DB_HOST=${DB_HOST:-cockroachdb}
-      - DB_PORT=${DB_PORT:-26257}
-      - DB_NAME=fraud_db
-      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
-      - KAFKA_BROKERS=${KAFKA_BROKERS:-kafka:9092}
-      - TX_EVENTS_TOPIC=transaction.events
-      - TX_SCORED_TOPIC=transaction.scored
-      - FRAUD_GROUP_ID=fraud-workers
-      - FRAUD_MODELS_DIR=/app/models
+      PORT: 3007
+      JWT_SECRET: ${JWT_SECRET:-banque_super_secret_2026}
+      DB_HOST: ${DB_HOST:-cockroachdb}
+      DB_PORT: ${DB_PORT:-26257}
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_SSL: ${DB_SSL:-disable}
+      DB_NAME: fraud_db
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      TX_EVENTS_TOPIC: transaction.events
+      TX_SCORED_TOPIC: transaction.scored
+      TX_CANCELLED_TOPIC: transaction.cancelled
+      FRAUD_GROUP_ID: fraud-workers
+      FRAUD_MODELS_DIR: /app/models
+      FRAUD_QUANTUM_WEIGHT: ${FRAUD_QUANTUM_WEIGHT:-0.3}
+    volumes:
+      - fraud_models:/app/models
     depends_on:
-      cockroachdb:
-        condition: service_healthy
-      kafka:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
+      cockroachdb: { condition: service_healthy }
+      kafka:       { condition: service_healthy }
+      kafka-init:  { condition: service_completed_successfully }
+      redis:       { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3007/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 180s          # first boot trains the VQC
+
+  # ── Phase 7 — Document computer-vision (OCR, integrity, signature) ─
+  document-cv-service:
+    <<: *service-defaults
+    build: { context: .., dockerfile: services/document-cv-service/Dockerfile }
+    ports: ["3008:3008"]
+    environment:
+      PORT: 3008
+      APP_ENV: ${NODE_ENV:-production}
+      JWT_SECRET: ${JWT_SECRET:-banque_super_secret_2026}
+      DB_HOST: ${DB_HOST:-cockroachdb}
+      DB_PORT: ${DB_PORT:-26257}
+      DB_USER: ${DB_USER:-root}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_SSL: ${DB_SSL:-disable}
+      DB_NAME: fraud_db
+      KAFKA_BROKERS: ${KAFKA_BROKERS:-kafka:9092}
+      DOCUMENT_TOPIC: document.analyzed
+      KMS_SERVICE_URL: http://kms-service:3006
+      DOCUMENT_STORE_DIR: /data/documents
+      DOCUMENT_MASTER_KEY: ${DOCUMENT_MASTER_KEY:-dev_only_master_key_change_me}
+      DOCUMENT_MAX_BYTES: ${DOCUMENT_MAX_BYTES:-10485760}
+      DOCUMENT_REVIEW_THRESHOLD: ${DOCUMENT_REVIEW_THRESHOLD:-0.30}
+      DOCUMENT_SUSPICIOUS_THRESHOLD: ${DOCUMENT_SUSPICIOUS_THRESHOLD:-0.70}
+      TESSERACT_LANGS: ${TESSERACT_LANGS:-eng+fra}
+    volumes:
+      - documents_data:/data/documents
+    depends_on:
+      cockroachdb: { condition: service_healthy }
+      kafka-init:  { condition: service_completed_successfully }
+      kms-service: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3008/health', timeout=3).status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  cockroach_data:
+  kafka_data:
+  fraud_models:
+  documents_data:

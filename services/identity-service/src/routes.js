@@ -3,7 +3,8 @@ const express     = require("express");
 const router      = express.Router();
 const authService = require("./auth.service");
 const userService = require("./user.service");
-const { authenticate, requireAdmin, requireStaff } = require("./middleware/auth.middleware");
+const { authenticate, requireAdmin, requireStaff } = require("/shared/auth");
+const userRepo = require("./user.repository");
 
 // Legacy unified login — kept for backwards compatibility (no role gate).
 // New clients should use /auth/staff/login or /auth/customer/login.
@@ -102,9 +103,11 @@ router.put("/auth/password", authenticate, async (req, res) => {
 // POST /admin/users — create a new user
 router.post("/admin/users", authenticate, requireAdmin, async (req, res) => {
   try {
-    res.status(201).json(await authService.createUser(req.body));
+    res.status(201).json(await authService.createUser(req.body || {}));
   } catch (err) {
-    res.status(400).json({ message: err.message });
+    const status = err.code === "ACCOUNT_PROVISIONING_FAILED" ? 502
+                 : /already exists|duplicate|unique/i.test(err.message) ? 409 : 400;
+    res.status(status).json({ message: err.code === "23505" ? "Username or email already in use" : err.message, code: err.code });
   }
 });
 
@@ -130,7 +133,6 @@ router.get("/admin/users/lookup/:value", authenticate, requireStaff, async (req,
       try { user = await userService.getUser(value); } catch (_) { user = null; }
     }
     if (!user) {
-      const userRepo = require("./user.repository");
       const found =
         (await userRepo.findByUsername(value)) ||
         (await userRepo.findByEmail(value));
@@ -173,6 +175,23 @@ router.delete("/admin/users/:id", authenticate, requireAdmin, async (req, res) =
                  : err.message.includes("own account") ? 403 : 400;
     res.status(status).json({ message: err.message });
   }
+});
+
+// GET /users/:id/display-name — minimal public profile for recipient
+// verification (any authenticated role). Never returns email/phone/address.
+router.get("/users/:id/display-name", authenticate, async (req, res) => {
+  try {
+    const user = await userService.getUser(req.params.id);
+    res.json({ id: user.id, name: user.name || user.username });
+  } catch (err) {
+    res.status(404).json({ message: err.message });
+  }
+});
+
+router.get("/health", (_req, res) => res.json({ status: "identity-service running" }));
+router.get("/ready", async (_req, res) => {
+  try { await userRepo.ping(); res.json({ status: "ready" }); }
+  catch (e) { res.status(503).json({ status: "degraded", error: e.message }); }
 });
 
 module.exports = router;

@@ -1,639 +1,510 @@
 // services/account-service/src/account.service.js
-const accountRepo = require("./account.repository")
-const ledgerRepo = require("./repositories/ledger.repository")
-const outboxRepo = require("./repositories/outbox.repository")
-const { randomUUID: uuidv4 } = require("crypto")
-const Money = require("/shared/money")
-const cache = require("/shared/cache")
+//
+// Core money path. Every mutation runs in ONE CockroachDB transaction that
+// spans account_db + ledger_db (fully-qualified table names, see
+// repositories/pool.js), so the cached balance, the double-entry ledger rows
+// and the outbox event commit or roll back together. Serialization conflicts
+// (40001) are retried by withTransaction.
+//
+// Structure: each operation has an inner `xxxTx(client, …)` that assumes an
+// open transaction, and a public wrapper that opens the transaction and
+// invalidates caches afterwards. `createTransaction` composes the inner
+// functions with idempotency-key handling inside the same transaction.
+const { randomUUID } = require("crypto")
+const { withTransaction } = require("/shared/db")
+const Money  = require("/shared/money")
+const cache  = require("/shared/cache")
+const { E }  = require("/shared/errors")
+const { isStaff } = require("/shared/auth")
+const accountRepo = require("./repositories/account.repository")
+const ledgerRepo  = require("./repositories/ledger.repository")
+const outboxRepo  = require("./repositories/outbox.repository")
+const docRepo     = require("./repositories/document.repository")
 
-const TX_TOPIC = process.env.TX_EVENTS_TOPIC || "transaction.events"
+const TX_TOPIC        = process.env.TX_EVENTS_TOPIC    || "transaction.events"
+const CANCELLED_TOPIC = process.env.TX_CANCELLED_TOPIC || "transaction.cancelled"
 const BALANCE_TTL_SEC = Number(process.env.BALANCE_CACHE_TTL || 60)
-const balanceKey = (userId) => `balance:user:${userId}`
-
-// Phase 0.3 — daily transfer cap (rolling 24h window of DEBITs from source).
-// Tunable per environment via DAILY_TRANSFER_LIMIT_TND (default 10 000 TND).
 const DAILY_TRANSFER_LIMIT_TND = Number(process.env.DAILY_TRANSFER_LIMIT_TND || 10000)
+const MAX_TX_AMOUNT = process.env.MAX_TX_AMOUNT || "1000000000"
+// Document-risk policy (CV extension §11): which document outcomes park the
+// transaction for manual verification instead of executing it.
+const HOLD_ON_STATUS  = (process.env.DOCUMENT_HOLD_ON_STATUS || "SUSPICIOUS").split(",").map(s => s.trim().toUpperCase())
+const HOLD_ON_REASONS = (process.env.DOCUMENT_HOLD_ON_REASONS || "duplicate_document,amount_mismatch").split(",").map(s => s.trim())
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-// Invalidate cached balance for a user on every committed mutation.
-// Uses both DEL (immediate) and pub/sub (cross-replica fan-out hook).
+const balanceKey = (userId) => `balance:user:${userId}`
+const nowIso = () => new Date().toISOString()
+
+// ── helpers ───────────────────────────────────────────────────────
 async function invalidateBalanceFor(userId) {
   if (!userId) return
   const k = balanceKey(userId)
   await cache.del(k)
   await cache.publishInvalidate(k)
 }
+const invalidateAll = (userIds) => { for (const u of new Set(userIds)) if (u) invalidateBalanceFor(u).catch(() => {}) }
 
+// Accepts number or decimal string; rejects NaN, <= 0, > hard cap.
+function parseAmount(amount, currency) {
+  let m
+  try { m = new Money(amount, currency) } catch (e) { throw E.invalidAmount("Invalid amount") }
+  if (m.isZero()) throw E.invalidAmount("Invalid amount: must be greater than zero")
+  if (m.isGreaterThan(new Money(MAX_TX_AMOUNT, currency))) throw E.invalidAmount("Invalid amount: exceeds maximum")
+  return m
+}
 
-// Called by identity-service after creating a user with role "user"
+const num = (m) => Number(m.toFixed(4))
+
+function assertActive(account) {
+  if (account.status && account.status !== "ACTIVE")
+    throw E.unprocessable("ACCOUNT_INACTIVE", `Account ${account.id} is ${account.status}`)
+}
+
+const actorId = (actor) => (actor && actor.userId && actor.userId !== "system") ? actor.userId : null
+const cleanRef = (v, max = 100) => (v === undefined || v === null) ? null : String(v).trim().slice(0, max) || null
+
+// ── create / read ─────────────────────────────────────────────────
 exports.createAccount = async ({ userId, currency = "TND" }) => {
-  if (!userId) throw new Error("userId is required")
-
-  // Prevent duplicate accounts
+  if (!userId) throw E.validation("userId is required")
   const existing = await accountRepo.findByUserId(userId)
-  if (existing) throw new Error("Account already exists for this user")
-
+  if (existing) throw E.conflict("ACCOUNT_EXISTS", "Account already exists for this user")
   const account = await accountRepo.create({ userId, currency })
-
   return { account }
 }
 
-// Called by customer frontend GET /balance
 exports.getBalance = async (userId) => {
-  // Read-through cache (Phase 2.1) — TTL bounds staleness even if a writer
-  // forgets to invalidate. Cache miss falls back to DB then warms the entry.
   const cached = await cache.get(balanceKey(userId))
   if (cached) {
     try { return JSON.parse(cached) } catch (_) { /* corrupt entry — fall through */ }
   }
-
   const account = await accountRepo.findByUserId(userId)
-  if (!account) throw new Error("Account not found")
-
+  if (!account) throw E.notFound("Account not found")
   const payload = {
     balance:       parseFloat(account.cached_balance),
-    available:     parseFloat(account.cached_balance),  // no pending logic yet
-    pending:       0.000,
+    available:     parseFloat(account.cached_balance),
+    pending:       0,
     currency:      account.currency,
     accountNumber: account.id,
+    status:        account.status || "ACTIVE",
   }
   await cache.setEx(balanceKey(userId), JSON.stringify(payload), BALANCE_TTL_SEC)
   return payload
 }
 
+exports.listPayees = (filters) => accountRepo.listPayees(filters)
 
+// ── deposit (staff) ───────────────────────────────────────────────
+async function depositTx(client, accountId, amount, { actor = null, note = null } = {}) {
+  const account = await accountRepo.getAccountForUpdate(client, accountId)
+  if (!account) throw E.notFound("Account not found")
+  assertActive(account)
 
+  const currency      = account.currency
+  const depositMoney  = parseAmount(amount, currency)
+  const newMoney      = new Money(account.cached_balance, currency).add(depositMoney)
+  const transactionId = randomUUID()
+  const timestamp     = nowIso()
+  const reference     = cleanRef(note) || `Deposit ${timestamp.slice(0, 10)}`
 
-exports.deposit = async (accountId, amount) => {
-  if (!amount || amount <= 0) {
-    throw new Error("Invalid amount")
-  }
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId, type: "CREDIT", txType: "DEPOSIT",
+    amount: depositMoney.toFixed(4), balance_snapshot: newMoney.toFixed(4),
+    reference, created_at: timestamp, initiatedBy: actorId(actor),
+  })
+  await accountRepo.updateBalance(client, accountId, newMoney.toFixed(4))
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: accountId,
+    payload: {
+      transactionId, type: "DEPOSIT", kind: "DEPOSIT", accountId,
+      amount: num(depositMoney), currency, balanceSnapshot: num(newMoney),
+      reference, initiatedBy: actorId(actor), timestamp,
+    },
+  })
+  return { transactionId, balance: num(newMoney), currency, timestamp, _users: [account.user_id] }
+}
 
-  const accountClient = await accountRepo.pool.connect()
-  const ledgerClient = await ledgerRepo.pool.connect()
+exports.deposit = async (accountId, amount, opts = {}) => {
+  if (!accountId) throw E.validation("accountId is required")
+  parseAmount(amount, "TND")
+  const r = await withTransaction(accountRepo.pool, (client) => depositTx(client, accountId, amount, opts))
+  invalidateAll(r._users); delete r._users
+  return r
+}
 
-  try {
-    await accountClient.query("BEGIN")
-    await ledgerClient.query("BEGIN")
+// ── withdraw (customer, own account) ──────────────────────────────
+async function withdrawTx(client, userId, amount, note, documentId = null) {
+  const account = await accountRepo.getAccountForUpdateByUserId(client, userId)
+  if (!account) throw E.notFound("Account not found")
+  assertActive(account)
 
-    // 🔒 Lock account row
-    const account = await accountRepo.getAccountForUpdate(
-      accountClient,
-      accountId
-    )
+  const currency      = account.currency
+  const currentMoney  = new Money(account.cached_balance, currency)
+  const withdrawMoney = parseAmount(amount, currency)
+  let newMoney
+  try { newMoney = currentMoney.subtract(withdrawMoney) }
+  catch { throw E.insufficientFunds(`Insufficient funds: ${currentMoney.toFixed(4)} < ${withdrawMoney.toFixed(4)}`) }
 
-    if (!account) throw new Error("Account not found")
+  const transactionId = randomUUID()
+  const timestamp     = nowIso()
+  const reference     = cleanRef(note) || `Withdrawal ${timestamp.slice(0, 10)}`
 
-    // 💱 Decimal-safe arithmetic via shared/money.js
-    const currency       = account.currency
-    const currentMoney   = new Money(account.cached_balance, currency)
-    const depositMoney   = new Money(amount, currency)
-    const newBalanceStr  = currentMoney.add(depositMoney).toFixed(4)
-    const newBalanceNum  = Number(newBalanceStr)
-
-    const transactionId = uuidv4()
-    const timestamp     = new Date().toISOString()
-
-    // 📜 Ledger entry
-    await ledgerRepo.insertEntry(ledgerClient, {
-      id: uuidv4(),
-      transactionId,
-      accountId,
-      type: "CREDIT",
-      amount: Number(depositMoney.toFixed(4)),
-      balance_snapshot: newBalanceNum,
-      reference: `Deposit ${new Date().toLocaleDateString()}`,
-      created_at: timestamp,
-    })
-
-    // 💰 Update balance
-    await accountRepo.updateBalance(
-      accountClient,
-      accountId,
-      newBalanceStr
-    )
-
-    // 📤 Phase 1.2 — Outbox: enqueue Kafka event in the SAME ledger txn.
-    await outboxRepo.enqueue(ledgerClient, {
-      transactionId,
-      topic: TX_TOPIC,
-      partitionKey: accountId,
-      payload: {
-        transactionId, type: "DEPOSIT", accountId,
-        amount: Number(depositMoney.toFixed(4)), currency,
-        balanceSnapshot: newBalanceNum,
-        reference: `Deposit ${new Date().toLocaleDateString()}`,
-        timestamp,
-      },
-    })
-
-    await accountClient.query("COMMIT")
-    await ledgerClient.query("COMMIT")
-
-    // Phase 2.1 — invalidate cached balance for the affected user.
-    invalidateBalanceFor(account.user_id).catch(() => {})
-
-    return {
-      transactionId,
-      balance: newBalanceNum
-    }
-
-  } catch (err) {
-    console.error("Error in deposit transaction:", err) 
-    await accountClient.query("ROLLBACK")
-    await ledgerClient.query("ROLLBACK")
-    throw err
-  } finally {
-    accountClient.release()
-    ledgerClient.release()
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId: account.id, type: "DEBIT", txType: "WITHDRAW",
+    amount: withdrawMoney.toFixed(4), balance_snapshot: newMoney.toFixed(4),
+    reference, created_at: timestamp, initiatedBy: userId, documentId,
+  })
+  if (documentId) await docRepo.linkDocument(client, documentId, transactionId)
+  await accountRepo.updateBalance(client, account.id, newMoney.toFixed(4))
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: account.id,
+    payload: {
+      transactionId, type: "WITHDRAW", kind: "WITHDRAW", accountId: account.id,
+      amount: num(withdrawMoney), currency, balanceSnapshot: num(newMoney),
+      reference, initiatedBy: userId, timestamp, documentId,
+    },
+  })
+  return {
+    transactionId, accountId: account.id, documentId,
+    previousBalance: num(currentMoney), newBalance: num(newMoney),
+    amount: num(withdrawMoney), currency, reference: cleanRef(note), timestamp,
+    _users: [userId],
   }
 }
 
-// TRANSFER: Move funds from one account to another (atomic transaction)
+exports.withdraw = async (userId, amount, note) => {
+  if (!userId) throw E.validation("userId is required")
+  parseAmount(amount, "TND")
+  const r = await withTransaction(accountRepo.pool, (client) => withdrawTx(client, userId, amount, note))
+  invalidateAll(r._users); delete r._users
+  return r
+}
 
-// services/account-service/src/account.service.js
+// ── move funds (transfer / bill payment / merchant payment) ───────
+// `actor` is the authenticated JWT payload. Customers may only debit their
+// own account; staff may move money between any two accounts.
+async function moveFundsTx(client, sourceAccountId, destinationAccountId, amount, options = {}) {
+  const { reference = null, actor = null, txType = "TRANSFER", counterparty = null, documentId = null, onBehalfOf = null } = options
+  if (!ledgerRepo.OUTBOUND_TYPES.includes(txType)) throw E.validation(`Unsupported transaction kind: ${txType}`)
+
+  // Lock both rows in a deterministic order so A→B and B→A cannot deadlock.
+  const locked = await accountRepo.lockAccounts(client, [sourceAccountId, destinationAccountId])
+  const sourceAccount = locked[sourceAccountId]
+  const destAccount   = locked[destinationAccountId]
+  if (!sourceAccount) throw E.notFound("Source account not found")
+  if (!destAccount)   throw E.notFound("Destination account not found")
+
+  if (actor && !isStaff(actor) && sourceAccount.user_id !== actor.userId)
+    throw E.forbidden("You can only transfer from your own account")
+  if (onBehalfOf && sourceAccount.user_id !== onBehalfOf)
+    throw E.forbidden("Held request does not belong to this account")
+
+  assertActive(sourceAccount)
+  assertActive(destAccount)
+  if (sourceAccount.currency !== destAccount.currency)
+    throw E.currencyMismatch(`Currency mismatch: ${sourceAccount.currency} ≠ ${destAccount.currency}`)
+
+  const currency      = sourceAccount.currency
+  const sourceMoney   = new Money(sourceAccount.cached_balance, currency)
+  const destMoney     = new Money(destAccount.cached_balance, currency)
+  const transferMoney = parseAmount(amount, currency)
+
+  // Daily cap: rolling 24h of outbound debits, checked under the row lock.
+  if (currency === "TND" && DAILY_TRANSFER_LIMIT_TND > 0) {
+    const since   = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
+    const used    = new Money(await ledgerRepo.sumTransferDebitsSince(client, sourceAccountId, since), "TND")
+    const limit   = new Money(DAILY_TRANSFER_LIMIT_TND, "TND")
+    const wouldBe = used.add(transferMoney)
+    if (wouldBe.isGreaterThan(limit))
+      throw E.dailyLimit(
+        `Daily transfer limit exceeded: ${wouldBe.toFixed(4)} TND > ${limit.toFixed(4)} TND ` +
+        `(already used ${used.toFixed(4)} in last 24h)`)
+  }
+
+  let newSourceMoney
+  try { newSourceMoney = sourceMoney.subtract(transferMoney) }
+  catch { throw E.insufficientFunds(`Insufficient funds: ${sourceMoney.toFixed(4)} < ${transferMoney.toFixed(4)}`) }
+  const newDestMoney = destMoney.add(transferMoney)
+
+  const transactionId = randomUUID()
+  const timestamp     = nowIso()
+  const initiatedBy   = actorId(actor)
+  const label     = counterparty?.name || null
+  const debitRef  = cleanRef(reference) || (label ? `${label}` : `Transfer to ${destinationAccountId}`)
+  const creditRef = cleanRef(reference) || `Transfer from ${sourceAccountId}`
+
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId: sourceAccountId, type: "DEBIT", txType,
+    amount: transferMoney.toFixed(4), balance_snapshot: newSourceMoney.toFixed(4),
+    reference: debitRef, created_at: timestamp, initiatedBy, documentId,
+  })
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId: destinationAccountId, type: "CREDIT", txType,
+    amount: transferMoney.toFixed(4), balance_snapshot: newDestMoney.toFixed(4),
+    reference: creditRef, created_at: timestamp, initiatedBy, documentId,
+  })
+  if (documentId) await docRepo.linkDocument(client, documentId, transactionId)
+  await accountRepo.updateBalance(client, sourceAccountId,      newSourceMoney.toFixed(4))
+  await accountRepo.updateBalance(client, destinationAccountId, newDestMoney.toFixed(4))
+
+  const common = { transactionId, kind: txType, amount: num(transferMoney), currency, initiatedBy, timestamp, documentId,
+                   counterparty: counterparty ? { code: counterparty.code, name: counterparty.name } : null }
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: sourceAccountId,
+    payload: { ...common, type: "TRANSFER_DEBIT", accountId: sourceAccountId,
+               counterpartyAccountId: destinationAccountId, balanceSnapshot: num(newSourceMoney), reference: debitRef },
+  })
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: destinationAccountId,
+    payload: { ...common, type: "TRANSFER_CREDIT", accountId: destinationAccountId,
+               counterpartyAccountId: sourceAccountId, balanceSnapshot: num(newDestMoney), reference: creditRef },
+  })
+
+  return {
+    transactionId, kind: txType, documentId,
+    source:      { accountId: sourceAccountId,      previousBalance: num(sourceMoney), newBalance: num(newSourceMoney) },
+    destination: { accountId: destinationAccountId, previousBalance: num(destMoney),   newBalance: num(newDestMoney) },
+    amount: num(transferMoney), currency, reference: cleanRef(reference), timestamp,
+    counterparty: counterparty ? { code: counterparty.code, name: counterparty.name, accountId: destinationAccountId } : null,
+    _users: [sourceAccount.user_id, destAccount.user_id],
+  }
+}
+
+function validateMove(sourceAccountId, destinationAccountId, amount, reference) {
+  if (!sourceAccountId || !destinationAccountId) throw E.validation("Both source and destination account IDs are required")
+  if (sourceAccountId === destinationAccountId)  throw E.validation("Cannot transfer to the same account")
+  parseAmount(amount, "TND")
+  if (reference && String(reference).length > 100) throw E.validation("reference must be at most 100 characters")
+}
 
 exports.transfer = async (sourceAccountId, destinationAccountId, amount, options = {}) => {
-  const { reference = null, initiatedBy = null } = options;
-  
-  console.log("🔄 Transfer initiated:", {
-    sourceAccountId,
-    destinationAccountId,
-    amount,
-    reference,
-    initiatedBy,
-    amountType: typeof amount,
-    amountValue: amount,
-  });
-  
-  // Validation
-  if (!amount || amount <= 0) {
-    throw new Error("Invalid amount");
+  validateMove(sourceAccountId, destinationAccountId, amount, options.reference)
+  const r = await withTransaction(accountRepo.pool, (client) =>
+    moveFundsTx(client, sourceAccountId, destinationAccountId, amount, { ...options, txType: "TRANSFER" }))
+  invalidateAll(r._users); delete r._users
+  return r
+}
+
+// ── unified POST /transactions ────────────────────────────────────
+// kinds: TRANSFER | BILL_PAYMENT | MERCHANT_PAYMENT | WITHDRAW
+// Optional idempotency key: the first request with a key owns it; retries
+// replay the stored response; a concurrent duplicate gets 409.
+const KINDS = ["TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT", "WITHDRAW"]
+
+// Validate + lock the supporting document. Returns the document row or null.
+async function checkDocument(client, documentId, ownerUserId, declaredAmount) {
+  if (!documentId) return null
+  if (!UUID_RE.test(String(documentId))) throw E.validation("documentId must be a UUID")
+  const doc = await docRepo.getDocumentForUpdate(client, documentId)
+  if (!doc) throw E.notFound("Document not found")
+  if (doc.owner_user_id !== ownerUserId) throw E.forbidden("Document belongs to another customer")
+  if (doc.transaction_id) throw E.conflict("DOCUMENT_ALREADY_USED", "This document is already attached to a transaction")
+  if (doc.expected_amount !== null && doc.expected_amount !== undefined && declaredAmount !== undefined) {
+    const a = new Money(doc.expected_amount, "TND"), b = new Money(declaredAmount, "TND")
+    if (!a.isEqualTo(b)) throw E.validation("Document was analysed for a different amount; upload it again")
   }
-  if (!sourceAccountId || !destinationAccountId) {
-    throw new Error("Both source and destination account IDs are required");
+  return doc
+}
+
+function holdDecision(doc) {
+  if (!doc) return null
+  const reasons = Array.isArray(doc.reasons) ? doc.reasons : []
+  if (HOLD_ON_STATUS.includes(String(doc.status).toUpperCase())) return `document ${doc.status} (risk ${Number(doc.risk_score).toFixed(2)})`
+  const hard = reasons.filter(r => HOLD_ON_REASONS.includes(r))
+  if (hard.length) return `document flagged: ${hard.join(", ")}`
+  return null
+}
+
+// Execute one request body as `owner` (used by createTransaction and by hold release).
+async function executeRequestTx(client, owner, body, actor, documentId = null) {
+  const kind = String(body.kind || "").toUpperCase()
+  if (kind === "WITHDRAW") {
+    const w = await withdrawTx(client, owner, body.amount, body.note ?? body.reference, documentId)
+    return { transactionId: w.transactionId, kind, amount: w.amount, currency: w.currency, documentId,
+             newBalance: w.newBalance, reference: w.reference, timestamp: w.timestamp, counterparty: null, _users: w._users }
   }
-  if (sourceAccountId === destinationAccountId) {
-    throw new Error("Cannot transfer to the same account");
+  const source = await accountRepo.findByUserId(owner, client)
+  if (!source) throw E.notFound("Account not found")
+
+  let destinationAccountId, counterparty = null, reference = body.reference
+  if (kind === "TRANSFER") {
+    destinationAccountId = body.destinationAccountId
+  } else {
+    const code = body.payeeCode || body.billerCode || body.merchantCode
+    if (!code) throw E.validation("payeeCode is required")
+    const payee = await accountRepo.findPayeeByCode(code, client)
+    if (!payee) throw E.notFound(`Unknown payee: ${code}`)
+    const expected = kind === "BILL_PAYMENT" ? "BILLER" : "MERCHANT"
+    if (payee.kind !== expected) throw E.validation(`${payee.code} is a ${payee.kind.toLowerCase()}, not valid for ${kind}`)
+    if (kind === "BILL_PAYMENT" && !cleanRef(body.referenceNumber, 64))
+      throw E.validation("referenceNumber is required for bill payments")
+    destinationAccountId = payee.account_id
+    counterparty = { code: payee.code, name: payee.name }
+    const refNo = cleanRef(body.referenceNumber, 64)
+    reference = refNo ? `${payee.name} · ${refNo}` : (cleanRef(body.reference) ? `${payee.name} · ${cleanRef(body.reference)}` : payee.name)
   }
 
-  const MAX_RETRIES = 3;
-  let lastError;
-  
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const accountClient = await accountRepo.pool.connect();
-    const ledgerClient = await ledgerRepo.pool.connect();
-    
-    try {
-      console.log(`📝 Transfer attempt ${attempt}/${MAX_RETRIES}`);
-      
-      await accountClient.query("BEGIN");
-      await ledgerClient.query("BEGIN");
-      
-      const [sourceAccount, destAccount] = await Promise.all([
-        accountRepo.getAccountForUpdate(accountClient, sourceAccountId),
-        accountRepo.getAccountForUpdate(accountClient, destinationAccountId),
-      ]);
-      
-      console.log("📊 Accounts loaded:", {
-        sourceBalance: sourceAccount?.cached_balance,
-        destBalance: destAccount?.cached_balance,
-        sourceCurrency: sourceAccount?.currency,
-        destCurrency: destAccount?.currency,
-      });
-      
-      if (!sourceAccount) throw new Error("Source account not found");
-      if (!destAccount) throw new Error("Destination account not found");
-      
-      if (sourceAccount.currency !== destAccount.currency) {
-        throw new Error(`Currency mismatch: ${sourceAccount.currency} ≠ ${destAccount.currency}`);
+  validateMove(source.id, destinationAccountId, body.amount, reference)
+  const m = await moveFundsTx(client, source.id, destinationAccountId, body.amount,
+    { reference, actor, txType: kind, counterparty, documentId, onBehalfOf: owner })
+  return { transactionId: m.transactionId, kind, amount: m.amount, currency: m.currency, documentId,
+           newBalance: m.source.newBalance, reference: m.reference ?? reference, timestamp: m.timestamp,
+           counterparty: m.counterparty || { accountId: destinationAccountId }, _users: m._users }
+}
+
+exports.createTransaction = async (actor, body = {}, idempotencyKey = null) => {
+  if (!actor?.userId) throw E.forbidden("Authentication required")
+  const kind = String(body.kind || "").toUpperCase()
+  if (!KINDS.includes(kind)) throw E.validation(`kind must be one of ${KINDS.join(", ")}`)
+  parseAmount(body.amount, "TND")
+  if (idempotencyKey !== null && !/^[\w.:-]{8,128}$/.test(idempotencyKey))
+    throw E.validation("Idempotency-Key must be 8-128 chars [A-Za-z0-9_.:-]")
+
+  const result = await withTransaction(accountRepo.pool, async (client) => {
+    if (idempotencyKey) {
+      const claim = await accountRepo.claimIdempotencyKey(client, actor.userId, idempotencyKey)
+      if (!claim.claimed) {
+        if (claim.response) return { ...claim.response, replayed: true, _users: [] }
+        throw E.conflict("IDEMPOTENT_IN_PROGRESS", "A request with this Idempotency-Key is still being processed")
       }
-      
-      // 💱 Decimal-safe arithmetic — Money.subtract throws on insufficient funds
-      const currency      = sourceAccount.currency;
-      const sourceMoney   = new Money(sourceAccount.cached_balance, currency);
-      const destMoney     = new Money(destAccount.cached_balance,   currency);
-      const transferMoney = new Money(amount, currency);
+    }
 
-      // 🛑 Phase 0.3 — Daily transfer cap (rolling 24h DEBITs from source).
-      // Computed *inside* the locked transaction to avoid race conditions.
-      // Only enforced for TND accounts; cross-currency limits TBD.
-      if (currency === "TND" && DAILY_TRANSFER_LIMIT_TND > 0) {
-        const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-        const usedStr = await ledgerRepo.sumDebitsSince(ledgerClient, sourceAccountId, since);
-        const used    = new Money(usedStr, "TND");
-        const limit   = new Money(DAILY_TRANSFER_LIMIT_TND, "TND");
-        const wouldBe = used.add(transferMoney);
-        if (wouldBe.isGreaterThan(limit)) {
-          const err = new Error(
-            `Daily transfer limit exceeded: ${wouldBe.toFixed(4)} TND > ${limit.toFixed(4)} TND ` +
-            `(already used ${used.toFixed(4)} in last 24h)`
-          );
-          err.code = "DAILY_LIMIT_EXCEEDED";
-          throw err;
+    // ── Document-risk gate (CV extension) ───────────────────────────
+    const doc = await checkDocument(client, body.documentId, actor.userId, body.amount)
+    const holdReason = holdDecision(doc)
+    let out
+    if (holdReason) {
+      const account = await accountRepo.findByUserId(actor.userId, client)
+      if (!account) throw E.notFound("Account not found")
+      const { documentId: _d, ...request } = body
+      const hold = await docRepo.createHold(client, {
+        userId: actor.userId, accountId: account.id, kind, request, documentId: doc.document_id,
+        reason: holdReason, riskScore: doc.risk_score,
+      })
+      out = { held: true, holdId: hold.id, kind, amount: num(parseAmount(body.amount, "TND")), currency: account.currency,
+              documentId: doc.document_id, documentStatus: doc.status, reason: holdReason,
+              message: "Transaction suspended pending manual verification of the attached document", timestamp: nowIso(), _users: [] }
+    } else {
+      out = await executeRequestTx(client, actor.userId, body, actor, doc ? doc.document_id : null)
+    }
+    if (idempotencyKey) {
+      const { _users, ...stored } = out
+      await accountRepo.storeIdempotentResponse(client, actor.userId, idempotencyKey, stored)
+    }
+    return out
+  })
+
+  invalidateAll(result._users); delete result._users
+  return result
+}
+
+// ── cancel (staff) ────────────────────────────────────────────────
+// Writes COMPENSATING ledger rows (never UPDATE/DELETE), registers the
+// cancellation (idempotent on original_transaction_id) and enqueues a
+// `transaction.cancelled` event — all in one transaction.
+exports.cancelTransaction = async (originalTransactionId, { reason, cancelledBy }) => {
+  if (!originalTransactionId) throw E.validation("originalTransactionId required")
+  if (!reason || String(reason).trim().length < 3) throw E.validation("reason required (min 3 chars)")
+  if (!cancelledBy) throw E.validation("cancelledBy required")
+  reason = String(reason).trim().slice(0, 500)
+
+  const cancellationId = randomUUID()
+
+  const result = await withTransaction(accountRepo.pool, async (client) => {
+    const existing = await client.query(
+      `SELECT cancellation_id, reason, cancelled_by, cancelled_at
+         FROM ledger_db.public.cancelled_transactions WHERE original_transaction_id = $1`,
+      [originalTransactionId]
+    )
+    if (existing.rows.length)
+      throw E.conflict("ALREADY_CANCELLED", "Transaction already cancelled", { existing: existing.rows[0] })
+
+    const orig = await ledgerRepo.findByTransactionId(client, originalTransactionId)
+    if (orig.length === 0) throw E.notFound("Original transaction not found")
+    if (orig.some(r => r.compensates !== null && r.compensates !== undefined) || orig.some(r => r.tx_type === "CANCELLATION"))
+      throw E.unprocessable("INVALID_TARGET", "Cannot cancel a compensating entry")
+
+    const accountIds = [...new Set(orig.map(r => r.account_id))].sort()
+    const locked = await accountRepo.lockAccounts(client, accountIds)
+    for (const id of accountIds) if (!locked[id]) throw E.notFound(`Account ${id} not found during cancellation`)
+
+    const compensations = []
+    const timestamp = nowIso()
+    for (const e of orig) {
+      const acc         = locked[e.account_id]
+      const currency    = acc.currency
+      const balMoney    = new Money(acc.cached_balance, currency)
+      const amtMoney    = new Money(e.amount, currency)
+      const reverseType = e.type === "DEBIT" ? "CREDIT" : "DEBIT"
+      let newBalMoney
+      if (reverseType === "CREDIT") newBalMoney = balMoney.add(amtMoney)
+      else {
+        try { newBalMoney = balMoney.subtract(amtMoney) }
+        catch {
+          throw E.conflict("REVERSAL_INSUFFICIENT_FUNDS",
+            `Account ${e.account_id} holds ${balMoney.toFixed(4)} ${currency}, cannot reverse ${amtMoney.toFixed(4)}`)
         }
       }
-
-      let newSourceMoney;
-      try {
-        newSourceMoney = sourceMoney.subtract(transferMoney);
-      } catch (e) {
-        throw new Error(`Insufficient funds: ${sourceMoney.toFixed(4)} < ${transferMoney.toFixed(4)}`);
-      }
-      const newDestMoney = destMoney.add(transferMoney);
-
-      const newSourceBalance = Number(newSourceMoney.toFixed(4));
-      const newDestBalance   = Number(newDestMoney.toFixed(4));
-      const sourceBalance    = Number(sourceMoney.toFixed(4));
-      
-      const transactionId = uuidv4();
-      const timestamp = new Date().toISOString();
-      
-      const debitEntry = {
-        id: uuidv4(),
-        transactionId,
-        accountId: sourceAccountId,
-        type: "DEBIT",
-        amount: Number(transferMoney.toFixed(4)),
-        balance_snapshot: newSourceBalance,
-        reference: reference || `Transfer to ${destinationAccountId}`,
-        created_at: timestamp,
-      };
-      
-      const creditEntry = {
-        id: uuidv4(),
-        transactionId,
-        accountId: destinationAccountId,
-        type: "CREDIT",
-        amount: Number(transferMoney.toFixed(4)),
-        balance_snapshot: newDestBalance,
-        reference: reference || `Transfer from ${sourceAccountId}`,
-        created_at: timestamp,
-      };
-      
-      // Insert ledger entries
-      await ledgerRepo.insertEntry(ledgerClient, debitEntry);
-      await ledgerRepo.insertEntry(ledgerClient, creditEntry);
-      
-      // Update balances (persist as fixed-precision strings)
-      await Promise.all([
-        accountRepo.updateBalance(accountClient, sourceAccountId, newSourceMoney.toFixed(4)),
-        accountRepo.updateBalance(accountClient, destinationAccountId, newDestMoney.toFixed(4)),
-      ]);
-
-      // 📤 Phase 1.2 — Outbox: one event per side, both in the ledger txn.
-      await outboxRepo.enqueue(ledgerClient, {
-        transactionId, topic: TX_TOPIC, partitionKey: sourceAccountId,
-        payload: {
-          transactionId, type: "TRANSFER_DEBIT",
-          accountId: sourceAccountId, counterpartyAccountId: destinationAccountId,
-          amount: Number(transferMoney.toFixed(4)), currency,
-          balanceSnapshot: newSourceBalance,
-          reference: debitEntry.reference, initiatedBy,
-          timestamp,
-        },
-      });
-      await outboxRepo.enqueue(ledgerClient, {
-        transactionId, topic: TX_TOPIC, partitionKey: destinationAccountId,
-        payload: {
-          transactionId, type: "TRANSFER_CREDIT",
-          accountId: destinationAccountId, counterpartyAccountId: sourceAccountId,
-          amount: Number(transferMoney.toFixed(4)), currency,
-          balanceSnapshot: newDestBalance,
-          reference: creditEntry.reference, initiatedBy,
-          timestamp,
-        },
-      });
-
-      await accountClient.query("COMMIT");
-      await ledgerClient.query("COMMIT");
-
-      // Phase 2.1 — invalidate balance cache for both ends of the transfer.
-      invalidateBalanceFor(sourceAccount.user_id).catch(() => {})
-      invalidateBalanceFor(destAccount.user_id).catch(() => {})
-
-      console.log("✅ Transfer successful:", { transactionId, newSourceBalance, newDestBalance });
-      
-      return {
-        transactionId,
-        source: {
-          accountId: sourceAccountId,
-          previousBalance: sourceBalance,
-          newBalance: newSourceBalance,
-        },
-        destination: {
-          accountId: destinationAccountId,
-          previousBalance: Number(destMoney.toFixed(4)),
-          newBalance: newDestBalance,
-        },
-        amount: Number(transferMoney.toFixed(4)),
-        currency,
-        reference,
-        timestamp,
-      };
-      
-    } catch (err) {
-      lastError = err;
-      console.error(`❌ Transfer attempt ${attempt} failed:`, err.message);
-      console.error("Full error:", err);
-      
-      if (err.code === "40001" && attempt < MAX_RETRIES) {
-        console.log(`⚠️ Serialization error, retrying...`);
-        try { await accountClient.query("ROLLBACK"); } catch (_) {}
-        try { await ledgerClient.query("ROLLBACK"); } catch (_) {}
-        continue;
-      }
-      
-      try { await accountClient.query("ROLLBACK"); } catch (_) {}
-      try { await ledgerClient.query("ROLLBACK"); } catch (_) {}
-      
-      throw err;
-      
-    } finally {
-      accountClient.release();
-      ledgerClient.release();
-    }
-  }
-  
-  throw lastError || new Error("Transfer failed after all retries");
-};
-// services/account-service/src/account.service.js
-
-exports.withdraw = async (accountId, amount, note) => {
-  // ── Validation ───────────────────────────────────────────────────
-  if (!amount || amount <= 0) {
-    throw new Error("Invalid amount");
-  }
-  if (!accountId) {
-    throw new Error("Account ID is required");
-  }
-
-  const accountClient = await accountRepo.pool.connect();
-  const ledgerClient = await ledgerRepo.pool.connect();
-
-  try {
-    // ── Start distributed transaction ─────────────────────────────
-    await accountClient.query("BEGIN");
-    await ledgerClient.query("BEGIN");
-
-    // 🔒 Lock account row for update (prevents race conditions)
-    const account = await accountRepo.getAccountByCustomerId(
-      accountClient,
-      accountId
-    );
-
-    if (!account) {
-      throw new Error("Account not found");
-    }
-
-    // 💱 Decimal-safe withdraw — Money.subtract throws on insufficient funds
-    const currency        = account.currency;
-    const currentMoney    = new Money(account.cached_balance, currency);
-    const withdrawMoney   = new Money(amount, currency);
-
-    let newMoney;
-    try {
-      newMoney = currentMoney.subtract(withdrawMoney);
-    } catch (e) {
-      throw new Error(`Insufficient funds: ${currentMoney.toFixed(4)} < ${withdrawMoney.toFixed(4)}`);
-    }
-    const newBalance      = Number(newMoney.toFixed(4));
-    const current         = Number(currentMoney.toFixed(4));
-    const transactionId   = uuidv4();
-    const timestamp       = new Date().toISOString();
-
-    // 📜 Insert DEBIT ledger entry
-    await ledgerRepo.insertEntry(ledgerClient, {
-      id: uuidv4(),
-      transactionId,
-      accountId: account.id,
-      type: "DEBIT",
-      amount: Number(withdrawMoney.toFixed(4)),
-      balance_snapshot: newBalance,
-      reference: note || `Withdrawal ${new Date().toLocaleDateString()}`,
-      created_at: timestamp,
-    });
-
-    // 💰 Update account balance
-    await accountRepo.updateBalance(
-      accountClient,
-      account.id,
-      newMoney.toFixed(4)
-    );
-
-    // 📤 Phase 1.2 — Outbox: enqueue withdrawal event.
-    await outboxRepo.enqueue(ledgerClient, {
-      transactionId, topic: TX_TOPIC, partitionKey: account.id,
-      payload: {
-        transactionId, type: "WITHDRAW", accountId: account.id,
-        amount: Number(withdrawMoney.toFixed(4)), currency,
-        balanceSnapshot: newBalance,
-        reference: note || `Withdrawal ${new Date().toLocaleDateString()}`,
-        timestamp,
-      },
-    });
-
-    // ✅ Commit both sides of distributed transaction
-    await accountClient.query("COMMIT");
-    await ledgerClient.query("COMMIT");
-
-    // Phase 2.1 — invalidate balance cache for the affected user.
-    invalidateBalanceFor(account.user_id).catch(() => {})
-
-    return {
-      transactionId,
-      accountId: account.id,
-      previousBalance: current,
-      newBalance,
-      amount: Number(withdrawMoney.toFixed(4)),
-      currency,
-      reference: note,
-      timestamp,
-    };
-
-  } catch (err) {
-    console.error("❌ Withdraw transaction failed:", err.message);
-
-    // 🔄 Rollback both connections on error
-    try { await accountClient.query("ROLLBACK"); } catch (_) {}
-    try { await ledgerClient.query("ROLLBACK"); } catch (_) {}
-
-    throw err; // Re-throw for upstream handling
-
-  } finally {
-    // ♻️ Always release connections back to pool
-    accountClient.release();
-    ledgerClient.release();
-  }
-};
-// ─────────────────────────────────────────────────────────────────────
-// Phase 4.4 — Cancel a fraudulent transaction.
-//
-// Writes COMPENSATING ledger entries (never UPDATE/DELETE) and an outbox
-// event `transaction.cancelled` in the SAME ledger transaction. Idempotent
-// on `originalTransactionId` via a unique row in `cancelled_transactions`.
-//
-// Compensating entry rules:
-//   - For every ledger row with transaction_id = original_tx_id, insert a
-//     reverse-type row of equal amount (CREDIT ↔ DEBIT) tagged with
-//     compensates = original_ledger_entry_id.
-//   - Lock affected accounts FOR UPDATE in deterministic id order to avoid
-//     deadlocks when multiple cancellations interleave.
-//   - Recompute balance_snapshot from the locked account row + new delta.
-//   - Each compensation gets a NEW transaction_id so it does not collide
-//     with the original on `event_outbox.transaction_id` (PRIMARY KEY).
-// ─────────────────────────────────────────────────────────────────────
-const CANCELLED_TOPIC = process.env.TX_CANCELLED_TOPIC || "transaction.cancelled"
-
-exports.cancelTransaction = async (originalTransactionId, { reason, cancelledBy }) => {
-  if (!originalTransactionId) throw new Error("originalTransactionId required")
-  if (!reason || String(reason).trim().length < 3) throw new Error("reason required (min 3 chars)")
-  if (!cancelledBy) throw new Error("cancelledBy required")
-
-  const accountClient = await accountRepo.pool.connect()
-  const ledgerClient  = await ledgerRepo.pool.connect()
-  const cancellationId = uuidv4()
-
-  try {
-    await accountClient.query("BEGIN")
-    await ledgerClient.query("BEGIN")
-
-    // 1) Idempotency check — fail fast if already cancelled.
-    const existing = await ledgerClient.query(
-      `SELECT cancellation_id, reason, cancelled_by, cancelled_at
-         FROM cancelled_transactions
-        WHERE original_transaction_id = $1`,
-      [originalTransactionId]
-    )
-    if (existing.rows.length) {
-      await accountClient.query("ROLLBACK")
-      await ledgerClient.query("ROLLBACK")
-      const e = new Error("Transaction already cancelled")
-      e.code = "ALREADY_CANCELLED"
-      e.existing = existing.rows[0]
-      throw e
-    }
-
-    // 2) Load original ledger entries for this transaction. Reject if any of
-    //    them is itself a compensation (cannot reverse a reversal).
-    const orig = await ledgerClient.query(
-      `SELECT id, account_id, type, amount, reference, compensates
-         FROM ledger_entries
-        WHERE transaction_id = $1
-        ORDER BY account_id ASC`,
-      [originalTransactionId]
-    )
-    if (orig.rows.length === 0) {
-      const e = new Error("Original transaction not found")
-      e.code = "NOT_FOUND"
-      throw e
-    }
-    if (orig.rows.some(r => r.compensates !== null && r.compensates !== undefined)) {
-      const e = new Error("Cannot cancel a compensating entry")
-      e.code = "INVALID_TARGET"
-      throw e
-    }
-
-    // 3) Lock ALL affected accounts in deterministic order (sorted ids).
-    const accountIds = [...new Set(orig.rows.map(r => r.account_id))].sort()
-    const lockedAccounts = {}
-    for (const accId of accountIds) {
-      const acc = await accountRepo.getAccountForUpdate(accountClient, accId)
-      if (!acc) throw new Error(`Account ${accId} not found during cancellation`)
-      lockedAccounts[accId] = acc
-    }
-
-    // 4) For each original entry: write a reverse entry + update balance.
-    const compensations = []
-    for (const e of orig.rows) {
-      const acc        = lockedAccounts[e.account_id]
-      const currency   = acc.currency
-      const balMoney   = new Money(acc.cached_balance, currency)
-      const amtMoney   = new Money(e.amount, currency)
-      const reverseType = e.type === "DEBIT" ? "CREDIT" : "DEBIT"
-      const newBalMoney = reverseType === "CREDIT" ? balMoney.add(amtMoney) : balMoney.subtract(amtMoney)
-      const newBalance  = Number(newBalMoney.toFixed(4))
-
-      const compEntry = {
-        id:               uuidv4(),
-        transactionId:    cancellationId,           // distinct tx_id for outbox PK
-        accountId:        e.account_id,
-        type:             reverseType,
-        amount:           Number(amtMoney.toFixed(4)),
-        balance_snapshot: newBalance,
-        reference:        `Cancellation of ${originalTransactionId}: ${reason}`,
-        created_at:       new Date().toISOString(),
-      }
-      // ledger.repository's insertEntry helper doesn't know about `compensates`,
-      // so we INSERT directly so the FK-style tag column is set atomically.
-      await ledgerClient.query(
-        `INSERT INTO ledger_entries
-           (id, transaction_id, account_id, type, amount, balance_snapshot, reference, created_at, compensates)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-        [compEntry.id, compEntry.transactionId, compEntry.accountId, compEntry.type,
-         compEntry.amount, compEntry.balance_snapshot, compEntry.reference, compEntry.created_at, e.id]
-      )
-      await accountRepo.updateBalance(accountClient, e.account_id, newBalMoney.toFixed(4))
-      lockedAccounts[e.account_id] = { ...acc, cached_balance: newBalMoney.toFixed(4) }
+      const row = await ledgerRepo.insertEntry(client, {
+        transactionId: cancellationId, accountId: e.account_id, type: reverseType, txType: "CANCELLATION",
+        amount: amtMoney.toFixed(4), balance_snapshot: newBalMoney.toFixed(4),
+        reference: `Cancellation of ${originalTransactionId}: ${reason}`.slice(0, 100),
+        created_at: timestamp, compensates: e.id, initiatedBy: cancelledBy,
+      })
+      await accountRepo.updateBalance(client, e.account_id, newBalMoney.toFixed(4))
+      locked[e.account_id] = { ...acc, cached_balance: newBalMoney.toFixed(4) }
       compensations.push({
-        compensatesLedgerId: e.id,
-        accountId:           e.account_id,
-        type:                reverseType,
-        amount:              compEntry.amount,
-        balanceSnapshot:     newBalance,
+        ledgerId: row?.id, compensatesLedgerId: e.id, accountId: e.account_id,
+        type: reverseType, amount: num(amtMoney), balanceSnapshot: num(newBalMoney),
       })
     }
 
-    // 5) Mark cancellation in registry.
-    await ledgerClient.query(
-      `INSERT INTO cancelled_transactions
-         (original_transaction_id, cancellation_id, reason, cancelled_by)
-       VALUES ($1, $2, $3, $4)`,
+    await client.query(
+      `INSERT INTO ledger_db.public.cancelled_transactions
+         (original_transaction_id, cancellation_id, reason, cancelled_by) VALUES ($1,$2,$3,$4)`,
       [originalTransactionId, cancellationId, reason, cancelledBy]
     )
-
-    // 6) Outbox event — relayed to Kafka by the existing relay loop.
-    await outboxRepo.enqueue(ledgerClient, {
-      transactionId: cancellationId,
-      topic:         CANCELLED_TOPIC,
-      partitionKey:  accountIds[0],
+    await outboxRepo.enqueue(client, {
+      transactionId: cancellationId, topic: CANCELLED_TOPIC, partitionKey: accountIds[0],
       payload: {
-        type:                  "TRANSACTION_CANCELLED",
-        originalTransactionId,
-        cancellationId,
-        reason,
-        cancelledBy,
-        affectedAccounts:      accountIds,
-        compensations,
-        timestamp:             new Date().toISOString(),
+        type: "TRANSACTION_CANCELLED", originalTransactionId, cancellationId, reason, cancelledBy,
+        affectedAccounts: accountIds, compensations, timestamp,
       },
     })
-
-    await accountClient.query("COMMIT")
-    await ledgerClient.query("COMMIT")
-
-    // 7) Invalidate balance caches for every affected user.
-    for (const accId of accountIds) {
-      try {
-        const acc = await accountRepo.findById(accId)
-        if (acc) invalidateBalanceFor(acc.user_id).catch(() => {})
-      } catch (_) {}
-    }
-
     return {
-      ok:                    true,
-      originalTransactionId,
-      cancellationId,
-      reason,
-      cancelledBy,
-      affectedAccounts:      accountIds,
-      compensations,
+      ok: true, originalTransactionId, cancellationId, reason, cancelledBy,
+      affectedAccounts: accountIds, compensations,
+      _users: Object.values(locked).map(a => a.user_id),
     }
-  } catch (err) {
-    try { await accountClient.query("ROLLBACK") } catch (_) {}
-    try { await ledgerClient.query("ROLLBACK")  } catch (_) {}
-    throw err
-  } finally {
-    accountClient.release()
-    ledgerClient.release()
-  }
+  })
+
+  invalidateAll(result._users); delete result._users
+  return result
 }
+
+// ── Held transactions (staff) ─────────────────────────────────────
+exports.listHolds = (filters) => docRepo.listHolds(filters)
+
+exports.decideHold = async (holdId, { action, actor, note }) => {
+  if (!UUID_RE.test(String(holdId))) throw E.validation("holdId must be a UUID")
+  if (!["RELEASE", "REJECT"].includes(String(action).toUpperCase())) throw E.validation("action must be RELEASE or REJECT")
+  if (!actor?.userId || !isStaff(actor)) throw E.forbidden("Staff access required")
+
+  const result = await withTransaction(accountRepo.pool, async (client) => {
+    const hold = await docRepo.getHoldForUpdate(client, holdId)
+    if (!hold) throw E.notFound("Hold not found")
+    if (hold.status !== "PENDING_REVIEW") throw E.conflict("HOLD_ALREADY_DECIDED", `Hold is already ${hold.status}`, { existing: { status: hold.status, decidedBy: hold.decided_by } })
+
+    if (String(action).toUpperCase() === "REJECT") {
+      await docRepo.decideHold(client, holdId, { status: "REJECTED", decidedBy: actor.userId, note })
+      return { ok: true, holdId, status: "REJECTED", _users: [] }
+    }
+    const request = typeof hold.request === "string" ? JSON.parse(hold.request) : hold.request
+    const exec = await executeRequestTx(client, hold.user_id, request, actor, hold.document_id)
+    await docRepo.decideHold(client, holdId, { status: "RELEASED", decidedBy: actor.userId, note, transactionId: exec.transactionId })
+    return { ok: true, holdId, status: "RELEASED", transaction: (({ _users, ...r }) => r)(exec), _users: exec._users }
+  })
+  invalidateAll(result._users); delete result._users
+  return result
+}
+
+exports._internal = { parseAmount, balanceKey, KINDS, holdDecision }

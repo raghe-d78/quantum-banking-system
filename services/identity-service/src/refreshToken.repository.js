@@ -1,7 +1,7 @@
 // services/identity-service/src/refreshToken.repository.js
 // Stores SHA-256 hashes of refresh tokens — never the raw token.
 const crypto = require("crypto");
-const createPool = require("../../../shared/db");
+const createPool = require("/shared/db");
 const pool = createPool("identity_db");
 
 const hash = (token) =>

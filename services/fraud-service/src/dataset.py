@@ -1,73 +1,81 @@
 """
-Synthetic fraud dataset (Phase 4.1).
+Synthetic fraud dataset (Phase 4.1, extended to feature schema v2).
 
-We generate ~10k normal transactions and ~1k fraudulent ones with deliberate
-fraud signals so a simple classifier can hit >0.9 ROC-AUC on a holdout. This
-data is purely for training / demo — never touches production traffic.
+Columns = FEATURE_NAMES: 7 transaction features, has_document, 9 CV features.
 
-Fraud signals injected:
-  - Large amounts (top 1% of normal distribution).
-  - Off-hour timestamps (00:00 - 05:00 local).
-  - Bursty velocity (5+ tx in last 5min).
-  - Lots of activity in the last 24h.
-
-Schema returned by `generate(n_normal, n_fraud, seed)`:
-  X : np.ndarray of shape (N, FEATURE_DIM)
-  y : np.ndarray of shape (N,)  with values 0 (normal) / 1 (fraud)
+Document features are planted honestly:
+  - 35 % of normal and 55 % of fraudulent transactions carry a document.
+  - Normal documents: high OCR confidence, low tampering, amount matches,
+    valid dates, no duplicates.
+  - Fraudulent documents: elevated tampering / ELA signals, frequent amount
+    mismatch, post-dated or stale dates, occasional duplicates, lower layout
+    consistency and signature similarity.
+  - Without a document, CV columns take the neutral values, so the models
+    must learn that "no document" is uninformative, not suspicious.
+This is a demo generator; the comparative report states that plainly.
 """
 import numpy as np
 
-from .features import FEATURE_NAMES, FEATURE_DIM
+from .features import CV_FEATURE_NAMES, CV_NEUTRAL, FEATURE_DIM, FEATURE_NAMES
+
+P_DOC_NORMAL = 0.35
+P_DOC_FRAUD  = 0.55
 
 
-def _make_normal(rng: np.random.Generator, n: int) -> np.ndarray:
-    """Normal transaction distribution."""
-    log_amount       = rng.normal(loc=4.5, scale=1.0, size=n)            # ~$90 median
-    hour             = rng.integers(7, 22, size=n).astype(float)         # business hours
-    dow              = rng.integers(0, 7,  size=n).astype(float)
-    rolling_24h_cnt  = rng.poisson(lam=3.0, size=n).astype(float)
-    rolling_24h_sum  = np.log1p(np.exp(log_amount) * (rolling_24h_cnt + 1))
-    velocity_5min    = rng.poisson(lam=0.2, size=n).astype(float)
-
-    h_rad = 2 * np.pi * hour / 24.0
-    d_rad = 2 * np.pi * dow  / 7.0
-    return np.column_stack([
-        log_amount,
-        np.sin(h_rad), np.cos(h_rad),
-        np.sin(d_rad), np.cos(d_rad),
-        rolling_24h_cnt,
-        rolling_24h_sum,
-    ])
+def _tx_block(rng, n, fraud: bool) -> np.ndarray:
+    if not fraud:
+        log_amount = rng.normal(4.5, 1.0, n); hour = rng.integers(7, 22, n).astype(float)
+        cnt = rng.poisson(3.0, n).astype(float)
+    else:
+        log_amount = rng.normal(7.5, 1.2, n); hour = rng.integers(0, 6, n).astype(float)
+        cnt = rng.poisson(12.0, n).astype(float)
+    dow = rng.integers(0, 7, n).astype(float)
+    rolling_sum = np.log1p(np.exp(log_amount) * (cnt + 1))
+    h = 2 * np.pi * hour / 24.0; d = 2 * np.pi * dow / 7.0
+    return np.column_stack([log_amount, np.sin(h), np.cos(h), np.sin(d), np.cos(d), cnt, rolling_sum])
 
 
-def _make_fraud(rng: np.random.Generator, n: int) -> np.ndarray:
-    """Fraud distribution with planted signals."""
-    log_amount       = rng.normal(loc=7.5, scale=1.2, size=n)            # ~$1800 median
-    hour             = rng.integers(0, 6, size=n).astype(float)          # off-hours
-    dow              = rng.integers(0, 7, size=n).astype(float)
-    rolling_24h_cnt  = rng.poisson(lam=12.0, size=n).astype(float)       # heavy activity
-    rolling_24h_sum  = np.log1p(np.exp(log_amount) * (rolling_24h_cnt + 1))
-    velocity_5min    = rng.poisson(lam=4.0, size=n).astype(float)        # bursty
-
-    h_rad = 2 * np.pi * hour / 24.0
-    d_rad = 2 * np.pi * dow  / 7.0
-    return np.column_stack([
-        log_amount,
-        np.sin(h_rad), np.cos(h_rad),
-        np.sin(d_rad), np.cos(d_rad),
-        rolling_24h_cnt,
-        rolling_24h_sum,
-    ])
+def _cv_block(rng, n, fraud: bool) -> np.ndarray:
+    p_doc = P_DOC_FRAUD if fraud else P_DOC_NORMAL
+    has = rng.random(n) < p_doc
+    neutral = np.array([CV_NEUTRAL[k] for k in CV_FEATURE_NAMES])
+    out = np.tile(neutral, (n, 1))
+    m = has.sum()
+    if m:
+        if not fraud:
+            feats = np.column_stack([
+                np.clip(rng.normal(0.88, 0.06, m), 0, 1),     # ocr_confidence
+                np.clip(rng.normal(0.90, 0.07, m), 0, 1),     # amount_confidence
+                np.clip(rng.normal(0.75, 0.12, m), 0, 1),     # document_quality
+                np.clip(rng.beta(1.5, 12, m), 0, 1),          # tampering_score (low)
+                np.clip(rng.normal(0.72, 0.15, m), 0, 1),     # signature_similarity
+                np.clip(rng.normal(0.85, 0.08, m), 0, 1),     # layout_consistency
+                rng.choice([1.0, 0.5, 0.0], m, p=[0.90, 0.08, 0.02]),   # amount_match
+                rng.choice([1.0, 0.5, 0.0], m, p=[0.92, 0.06, 0.02]),   # date_validity
+                rng.choice([0.0, 1.0], m, p=[0.995, 0.005]),  # duplicate_score
+            ])
+        else:
+            feats = np.column_stack([
+                np.clip(rng.normal(0.70, 0.15, m), 0, 1),
+                np.clip(rng.normal(0.65, 0.20, m), 0, 1),
+                np.clip(rng.normal(0.55, 0.20, m), 0, 1),
+                np.clip(rng.beta(5, 4, m), 0, 1),             # tampering_score (high)
+                np.clip(rng.normal(0.35, 0.20, m), 0, 1),
+                np.clip(rng.normal(0.55, 0.20, m), 0, 1),
+                rng.choice([1.0, 0.5, 0.0], m, p=[0.35, 0.20, 0.45]),
+                rng.choice([1.0, 0.5, 0.0], m, p=[0.50, 0.15, 0.35]),
+                rng.choice([0.0, 1.0], m, p=[0.80, 0.20]),
+            ])
+        out[has] = feats
+    return np.column_stack([has.astype(float), out])
 
 
 def generate(n_normal: int = 10_000, n_fraud: int = 1_000, seed: int = 42):
     rng = np.random.default_rng(seed)
-    X_n = _make_normal(rng, n_normal)
-    X_f = _make_fraud(rng, n_fraud)
-    X   = np.vstack([X_n, X_f])
-    y   = np.concatenate([np.zeros(n_normal, dtype=int), np.ones(n_fraud, dtype=int)])
-
-    # shuffle in place
+    X_n = np.hstack([_tx_block(rng, n_normal, False), _cv_block(rng, n_normal, False)])
+    X_f = np.hstack([_tx_block(rng, n_fraud, True),  _cv_block(rng, n_fraud, True)])
+    X = np.vstack([X_n, X_f])
+    y = np.concatenate([np.zeros(n_normal, dtype=int), np.ones(n_fraud, dtype=int)])
     idx = rng.permutation(len(y))
     assert X.shape[1] == FEATURE_DIM, f"expected {FEATURE_DIM} cols, got {X.shape[1]}"
     return X[idx], y[idx], FEATURE_NAMES

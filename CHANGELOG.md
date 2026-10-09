@@ -3,6 +3,183 @@
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Phase 7: Document computer-vision extension
+
+### Added
+- **document-cv-service** (FastAPI, OpenCV, Tesseract, port 3008): upload
+  validation (magic bytes, 10 MB, decompression-bomb guard, EXIF strip),
+  preprocessing (resize, perspective correction, denoise, deskew, CLAHE),
+  quality metrics, OCR with per-field confidences (amount, date, payee,
+  number, bank, currency), integrity analysis (ELA, noise inconsistency,
+  blockiness, copy-move), layout consistency, experimental signature
+  similarity with staff enrolment, cross-checks (amount vs declared, date
+  validity), perceptual-hash duplicate detection, a 9-feature vector, a
+  transparent risk score with CLEAN / REVIEW / SUSPICIOUS, envelope
+  encryption of stored images with BB84-derived data keys from the KMS,
+  `document.analyzed` Kafka events. 19 unit tests.
+- **Transaction gating**: `POST /transactions` accepts `documentId`; the
+  document row is locked, must be owned by the caller, unused, and analysed
+  for the declared amount. SUSPICIOUS documents (or duplicate / amount
+  mismatch) park the request in `held_transactions` (`202 held`); clean ones
+  execute with `document_id` on every ledger leg and in the outbox event.
+- **Staff holds**: `GET /admin/holds`, `POST /admin/holds/:id/release`
+  (re-executes the parked request atomically on behalf of the customer) and
+  `…/reject`; `GET /transactions/holds` for customers.
+- **Fraud feature schema v2** (17 dims = 7 transaction + has_document + 9 CV),
+  dataset v2 with planted document signals, consumer joins
+  `document_analyses` by id, `/fraud/score` accepts `documentId`, ablation
+  (with / without CV) in `eval_compare`.
+- Gateway: raw multipart passthrough (12 MB), `/documents/*`, `/admin/holds/*`.
+- Customer wizard: *Supporting document* step with analysis card and the
+  **Under review** outcome; overview banner for pending holds.
+- Staff portal: *Documents* group (Document review with decrypted image and
+  signal bars, Analysed documents, Signature enrolment).
+- The UI walkthrough uploads a check in the wizard and opens the staff
+  document panel (12 checks, new screenshots).
+- Schema: `document_analyses`, `signature_templates`, `held_transactions`,
+  `ledger_entries.document_id`; migration `003_cv_extension.sql`.
+- `make e2e-cv` (36 live checks) and `scripts/e2e/make_checks.py`, which
+  draws a fresh check layout per run (the duplicate index is global, so
+  stale samples would be flagged); `docs/CV_EXTENSION.md` technical reference.
+
+### Changed
+- Risk policy: a hard finding (`duplicate_document`, `amount_mismatch`,
+  `invalid_date`) lifts the verdict to at least `REVIEW` whatever the
+  weighted score says; ELA floors the reference block error so flat paper
+  no longer pins the score at 1.0.
+- BB84 now aborts the whole session when **any** round exceeds the QBER
+  threshold (previously one clean round was enough), and samples at least
+  16 bits per round for the QBER estimate. Eve is caught in every e2e run.
+- ledger-service and account-service expose `document_id` on ledger reads.
+
+## [Unreleased] — Phase 6.1: Payments, wizard, end-to-end verification
+
+### Added
+- **Unified `POST /transactions`** (`kind` = TRANSFER | BILL_PAYMENT |
+  MERCHANT_PAYMENT | WITHDRAW) with `Idempotency-Key` support claimed inside
+  the money transaction (`ledger_db.idempotency_keys`): retries replay, a
+  concurrent duplicate gets 409, double charge is impossible.
+- **Payee registry** (`account_db.payees`, 8 seeded billers/merchants with
+  settlement accounts) + `GET /payees`; ledger `tx_type` gains
+  `BILL_PAYMENT` / `MERCHANT_PAYMENT`; the daily cap covers all outbound kinds.
+- **Customer portal redesign**: shared design system (`styles/theme.css`,
+  SVG icon set, UI primitives), Overview with hero balance, quick actions and
+  recent activity, a 4-step **New Transaction wizard** (recipient verification,
+  payee picker with reference hints, amount chips, review receipt with balance
+  after, idempotent confirm, success receipt), real-API transaction detail.
+  Replaces the mock `CreateTransaction`, `TransferPage`, `WithdrawPage` and
+  `BalancePage`.
+- **Staff portal** shares the same shell (`StaffShell`), icons and theme;
+  employees get the fraud pages.
+- **End-to-end scripts** in `scripts/e2e/` (`make e2e-api`, `make e2e-ui`):
+  72 API checks and an 8-step Playwright walkthrough with screenshots, both
+  green against the live CockroachDB + Kafka + Redis stack.
+- Migration `002_payments_and_idempotency.sql`.
+
+### Changed
+- Fraud decision policy is now a weighted blend (default 0.7 classical /
+  0.3 quantum, `FRAUD_QUANTUM_WEIGHT`) instead of `max()`: with the current
+  VQC at AUC ≈ 0.5, `max()` flagged every transaction as High.
+- Fraud alert insertion is cancellation-aware (cross-database read of
+  `cancelled_transactions`), so replays never resurrect an alert for a
+  reversed transaction.
+- KMS default `KEY_QUBITS` raised 512 → 1024: 512 qubits sift to ~190 key
+  bits, below the 256 needed for AES-256 (found by the e2e run).
+
+### Fixed
+- `InputField` dropped `onKeyDown`, so Enter never submitted the login forms.
+- History page read `created_at` / `balance_snapshot` while the API returns
+  camelCase, so dates showed as "—".
+
+## [Unreleased] — Phase 6: Industrial hardening
+
+### Fixed (security)
+- **Transfer ownership.** `POST /transfer` now rejects a `sourceAccountId`
+  that does not belong to the caller (`403 FORBIDDEN`); staff may still move
+  money between arbitrary accounts.
+- **Edge authentication.** The gateway verifies the JWT and applies role
+  gates before proxying. `/fraud/*`, `/kms/*`, `/ledger/*`, `/audit/*` and
+  `/admin/*` are staff-only; `/quantum/*` requires any authenticated role.
+  fraud-service (PyJWT), kms-service, ledger-service and audit-service
+  verify again themselves.
+- **Withdraw race.** Withdraw now locks the account row (`FOR UPDATE` by
+  user id) instead of a plain SELECT.
+- **Statement export XSS / CSV injection.** HTML is escaped, formula-leading
+  cells are neutralised, response carries a restrictive CSP.
+- **Suspended users** can no longer log in or refresh; refresh revokes the
+  chain.
+- **Rate limiter spoofing.** `trust proxy` is only enabled with
+  `TRUST_PROXY=true` (set by the prod overlay).
+- Unknown JWT roles are rejected (401) rather than silently treated as users.
+
+### Fixed (correctness)
+- **Atomic money path.** Deposit, withdraw, transfer and cancel run in ONE
+  CockroachDB transaction spanning `account_db` and `ledger_db` via
+  fully-qualified table names (`shared/db.withTransaction`), with automatic
+  retry on serialization failures (40001). The old two-connection,
+  two-COMMIT window is gone.
+- **Transfers were half-audited and half-scored.** `audit_logs`,
+  `fraud_scores` and `fraud_alerts` now use composite keys
+  (`transaction_id, account_id[, event_type]`) so both legs are recorded.
+- **Daily cap** counts only outgoing `TRANSFER` debits (new `tx_type`
+  column), not withdrawals or compensations.
+- **Cancellation closes the fraud alert.** fraud-service consumes
+  `transaction.cancelled` and marks alerts `CANCELLED`; audit-service
+  records one `TRANSACTION_CANCELLED` row per compensation.
+- A reversal that would overdraw fails with `409 REVERSAL_INSUFFICIENT_FUNDS`
+  instead of a 500.
+- Money precision aligned to `DECIMAL(19,4)` everywhere (balances were 3 dp).
+- Gateway now proxies `/accounts/verify/:id`, `PUT /auth/password`,
+  `/transactions/export`, forwards query strings on `/transactions`, and
+  drops the dead `POST /transactions`.
+- staff_frontend failed to build on Linux (`Loginpage.jsx` vs
+  `./pages/LoginPage` import). Renamed; both SPAs lint and build clean.
+- Customer transaction detail page now reads the real API instead of mock
+  data and sits behind the protected route.
+
+### Added
+- `shared/db` env-driven pool + `withTransaction`; `shared/auth` RBAC
+  middleware; `shared/errors` typed `AppError` with stable codes and an
+  Express handler; `shared/logger` JSON logger.
+- ledger-service is a real read-side: entries, transaction legs with
+  double-entry check, and `GET /ledger/accounts/:id/reconcile` (ledger vs
+  cached balance drift).
+- Outbox relay claims with `FOR UPDATE SKIP LOCKED` (multi-replica safe),
+  idempotent Kafka producer (`acks=all`), adaptive drain, `GET /admin/outbox/stats`.
+- `GET /admin/accounts/:id/transactions`, `GET /ready` everywhere,
+  `GET /ready` on the gateway fans out to all upstreams.
+- `POST /fraud/alerts/:id/dismiss`, alert filters by status / risk,
+  dismissed / cancelled KPIs and a Dismiss action in the staff dashboard.
+- Account `status` (ACTIVE / FROZEN / CLOSED) enforced on every mutation.
+- Compose: healthchecks on every service, `restart: unless-stopped`, log
+  rotation, named volumes for CockroachDB, Kafka and fraud models,
+  explicit topic creation (auto-create off), pinned CockroachDB image.
+  Prod overlay removes all internal host ports and sets resource limits.
+  Dev overlay uses `node --watch`.
+- Dockerfiles: `node:20-slim`, `npm ci --omit=dev`, non-root user; fraud
+  image runs as `appuser`, models on a volume.
+- `scripts/migrations/001_phase6_industrial.sql` + `make db-migrate`,
+  `make test`, `make prod`.
+- CI: matrix over shared + 4 Node services, pytest, frontend lint + build,
+  compose validation for both overlays, image build.
+- OpenAPI 2.0.0 covering all 39 routes and the error-code catalogue.
+- Tests: 180 total (was 94). New coverage for ownership, auth gates, 40001
+  retry, single-COMMIT ordering, reversal edge cases, export escaping,
+  reconciliation, gateway header forwarding and raw passthrough.
+
+### Removed
+- Dead gateway files (`routes/auth.routes.js` pointing at port 8000, empty
+  middleware), `account.repository.js` shim, `test-import.js`,
+  identity `reco.js` password-reset script, bogus `test` npm dependency,
+  unused `uuid` dependency, `transaction_db` database.
+
+### Changed
+- Access tokens default to 15 minutes (`JWT_EXPIRES`), bcrypt cost 12.
+- Error bodies are `{ ok:false, code, message }` across services; the
+  frontends read `message` first.
+- README rewritten to match the stack that actually runs (CockroachDB,
+  Apache Kafka KRaft, seed admin `adminn`).
+
 ## [Unreleased] — Phase 5: NFR Hardening
 
 ### Added (Documentation — Usage guide & code-graph visualization)
