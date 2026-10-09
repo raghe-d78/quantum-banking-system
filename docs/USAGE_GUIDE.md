@@ -265,7 +265,9 @@ Use real IBM hardware (Phase 3.5):
 ## 9. Running the automated test suites
 
 ```bash
-make test                     # everything below in one go
+make test                     # every unit suite in one go
+make e2e-api                  # 72 live checks through the gateway (stack must be up)
+make e2e-ui                   # Playwright walkthrough of both portals + screenshots
 
 # Per package
 cd shared                    && npm test

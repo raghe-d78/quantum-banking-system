@@ -3,6 +3,45 @@
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Phase 6.1: Payments, wizard, end-to-end verification
+
+### Added
+- **Unified `POST /transactions`** (`kind` = TRANSFER | BILL_PAYMENT |
+  MERCHANT_PAYMENT | WITHDRAW) with `Idempotency-Key` support claimed inside
+  the money transaction (`ledger_db.idempotency_keys`): retries replay, a
+  concurrent duplicate gets 409, double charge is impossible.
+- **Payee registry** (`account_db.payees`, 8 seeded billers/merchants with
+  settlement accounts) + `GET /payees`; ledger `tx_type` gains
+  `BILL_PAYMENT` / `MERCHANT_PAYMENT`; the daily cap covers all outbound kinds.
+- **Customer portal redesign**: shared design system (`styles/theme.css`,
+  SVG icon set, UI primitives), Overview with hero balance, quick actions and
+  recent activity, a 4-step **New Transaction wizard** (recipient verification,
+  payee picker with reference hints, amount chips, review receipt with balance
+  after, idempotent confirm, success receipt), real-API transaction detail.
+  Replaces the mock `CreateTransaction`, `TransferPage`, `WithdrawPage` and
+  `BalancePage`.
+- **Staff portal** shares the same shell (`StaffShell`), icons and theme;
+  employees get the fraud pages.
+- **End-to-end scripts** in `scripts/e2e/` (`make e2e-api`, `make e2e-ui`):
+  72 API checks and an 8-step Playwright walkthrough with screenshots, both
+  green against the live CockroachDB + Kafka + Redis stack.
+- Migration `002_payments_and_idempotency.sql`.
+
+### Changed
+- Fraud decision policy is now a weighted blend (default 0.7 classical /
+  0.3 quantum, `FRAUD_QUANTUM_WEIGHT`) instead of `max()`: with the current
+  VQC at AUC ≈ 0.5, `max()` flagged every transaction as High.
+- Fraud alert insertion is cancellation-aware (cross-database read of
+  `cancelled_transactions`), so replays never resurrect an alert for a
+  reversed transaction.
+- KMS default `KEY_QUBITS` raised 512 → 1024: 512 qubits sift to ~190 key
+  bits, below the 256 needed for AES-256 (found by the e2e run).
+
+### Fixed
+- `InputField` dropped `onKeyDown`, so Enter never submitted the login forms.
+- History page read `created_at` / `balance_snapshot` while the API returns
+  camelCase, so dates showed as "—".
+
 ## [Unreleased] — Phase 6: Industrial hardening
 
 ### Fixed (security)

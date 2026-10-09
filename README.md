@@ -7,7 +7,7 @@
 > project, engineered to industrial standards.
 
 [![CI](https://img.shields.io/badge/CI-node%20%7C%20python%20%7C%20frontends%20%7C%20docker-blue)]()
-[![Tests](https://img.shields.io/badge/tests-180%20passing-success)]()
+[![Tests](https://img.shields.io/badge/tests-197%20unit%20%2B%2080%20e2e-success)]()
 [![Phases](https://img.shields.io/badge/phases-0--6%20complete-brightgreen)]()
 [![License](https://img.shields.io/badge/license-Academic-blue)]()
 
@@ -18,7 +18,8 @@
 1. [What this project is](#what-this-project-is)
 2. [Architecture](#architecture)
 3. [Services](#services)
-4. [Money path: how a transfer really commits](#money-path-how-a-transfer-really-commits)
+4. [Screenshots](#screenshots)
+5. [Money path: how a transfer really commits](#money-path-how-a-transfer-really-commits)
 5. [Security model](#security-model)
 6. [Quantum components](#quantum-components)
 7. [Quick start](#quick-start)
@@ -125,8 +126,22 @@ effectively-exactly-once rows.
 
 | Folder | Stack | Audience |
 |---|---|---|
-| `customer_frontend/` | React 19 + Vite | Balance, transfer wizard with recipient check, withdraw, history, statement export, profile, password |
-| `staff_frontend/` | React 19 + Vite + antd | User admin, deposits, **fraud dashboard** (alerts, KPIs, cancel, dismiss) |
+| `customer_frontend/` | React 19 + Vite | Overview with quick actions, **4-step New Transaction wizard** (transfer with recipient check, bill, merchant, withdraw) with idempotent submit, history, statement export, detail, profile, password |
+| `staff_frontend/` | React 19 + Vite + antd | Same design system: user admin, deposits, **fraud dashboard** (alerts, KPIs, cancel, dismiss) |
+
+Both SPAs share one design system (`src/styles/theme.css`, inline SVG icons,
+`src/components/ui`): navy + gold on cream, serif display type, tabular
+numerals, and a stepper, receipt and alert vocabulary used consistently.
+
+---
+
+## Screenshots
+
+Captured by `make e2e-ui` against the live stack (more in [`docs/screenshots/`](docs/screenshots/)).
+
+| Customer overview | New transaction — review | Staff fraud dashboard |
+|---|---|---|
+| ![Overview](docs/screenshots/c02-overview.png) | ![Review](docs/screenshots/c04-transfer-review.png) | ![Fraud](docs/screenshots/s04-fraud-transactions.png) |
 
 ---
 
@@ -148,6 +163,15 @@ POST /transfer  ──►  gateway verifies JWT  ──►  account-service
    invalidate Redis balance cache for both users (best effort)
    outbox relay ──► Kafka ──► audit-service, fraud-service
 ```
+
+**Unified `POST /transactions`.** One endpoint drives the customer wizard:
+`kind` is `TRANSFER`, `BILL_PAYMENT`, `MERCHANT_PAYMENT` or `WITHDRAW`.
+Billers and merchants come from the `payees` registry, each with its own
+settlement account, so a bill payment is still a double-entry transfer with
+`tx_type = BILL_PAYMENT`. An `Idempotency-Key` header is claimed inside the
+same transaction as the money movement: a retry replays the stored response
+with `replayed: true`, a concurrent duplicate gets `409`, and nothing can
+ever be charged twice.
 
 Cancellation (`POST /admin/transactions/:id/cancel`) runs the same way:
 it never updates or deletes the original rows. It inserts one reverse
@@ -207,8 +231,10 @@ accepted rounds. Reference circuit diagrams live in [`docs/quantum/`](docs/quant
 ### Variational Quantum Classifier — fraud scoring
 `ZZFeatureMap(4 qubits)` + `RealAmplitudes` + COBYLA, trained on a
 stratified 300-sample subset after `StandardScaler → PCA(7→4)`. Scores run
-beside a logistic-regression baseline; the decision policy is
-`max(classical, quantum)`. Model bundles persist on the `fraud_models`
+beside a logistic-regression baseline; the decision policy is a weighted
+blend (`0.7 × classical + 0.3 × quantum`, `FRAUD_QUANTUM_WEIGHT`) so an
+uninformative VQC cannot flood the alert feed while a confident one can
+still escalate a borderline case. Model bundles persist on the `fraud_models`
 volume and train automatically on first boot.
 
 ---
@@ -313,14 +339,27 @@ make test        # every suite on the host
 | Package | Suites | Tests | Covers |
 |---|---|---|---|
 | shared | 1 | 25 | Money arithmetic, rounding, currency guards |
-| account-service | 7 | 72 | Atomic deposit / withdraw / transfer, ownership, daily cap, 40001 retry, cancellation, export escaping, route status mapping |
+| account-service | 8 | 84 | Atomic deposit / withdraw / transfer, ownership, daily cap, 40001 retry, cancellation, export escaping, route status mapping |
 | identity-service | 3 | 30 | Login per portal, suspension, refresh, validation, provisioning, admin CRUD |
 | ledger-service | 2 | 16 | Append-only contract, reconciliation, auth gates |
-| api-gateway | 1 | 25 | Edge auth, role gates, header forwarding, raw passthrough, 502/504 mapping |
-| fraud-service | 2 | 12 | Feature math, risk policy, JWT decorator |
+| api-gateway | 1 | 26 | Edge auth, role gates, header forwarding, raw passthrough, 502/504 mapping |
+| fraud-service | 2 | 13 | Feature math, risk policy, JWT decorator |
 
 CI runs all six, lints and builds both frontends, validates both compose
 files and builds every image.
+
+### End-to-end verification (live stack)
+
+```bash
+make e2e-api     # 72 checks through the gateway: auth, RBAC, deposits, transfers,
+                 # payments, idempotency, limits, export, reconciliation, audit,
+                 # cancellation, fraud, QRNG, BB84, KMS, refresh rotation, suspension
+make e2e-ui      # Playwright drives both portals (login → wizard → history → detail,
+                 # staff deposit → fraud dashboard) and writes screenshots to scripts/e2e/shots
+```
+
+Both scripts were run against CockroachDB v24.1, Apache Kafka 3.7 and Redis 7
+with every service live; the counts in this README come from that run.
 
 ---
 
@@ -336,7 +375,9 @@ Interactive Swagger UI at <http://localhost:3000/docs>, JSON at `/docs.json`.
 | `GET /balance` | any | Cached balance |
 | `GET /accounts/verify/:id` | any | Recipient check (name, currency, status only) |
 | `GET /transactions`, `/transactions/:id`, `/transactions/export` | any | Own history, detail, CSV / statement |
-| `POST /transfer`, `POST /withdraw` | any | Money movement on own account |
+| `POST /transactions` | any | Unified create: transfer, bill, merchant, withdraw (idempotent) |
+| `GET /payees` | any | Billers and merchants |
+| `POST /transfer`, `POST /withdraw` | any | Legacy single-purpose endpoints (still supported) |
 | `GET /quantum/*` , `POST /quantum/qkd/bb84` | any | Quantum demos |
 | `POST /admin/deposit` | staff | Credit any account |
 | `GET /admin/accounts/:id[/transactions]` | staff | Lookup by id, username or email |

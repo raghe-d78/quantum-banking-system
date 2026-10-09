@@ -5,6 +5,11 @@
 // repositories/pool.js), so the cached balance, the double-entry ledger rows
 // and the outbox event commit or roll back together. Serialization conflicts
 // (40001) are retried by withTransaction.
+//
+// Structure: each operation has an inner `xxxTx(client, …)` that assumes an
+// open transaction, and a public wrapper that opens the transaction and
+// invalidates caches afterwards. `createTransaction` composes the inner
+// functions with idempotency-key handling inside the same transaction.
 const { randomUUID } = require("crypto")
 const { withTransaction } = require("/shared/db")
 const Money  = require("/shared/money")
@@ -31,6 +36,7 @@ async function invalidateBalanceFor(userId) {
   await cache.del(k)
   await cache.publishInvalidate(k)
 }
+const invalidateAll = (userIds) => { for (const u of new Set(userIds)) if (u) invalidateBalanceFor(u).catch(() => {}) }
 
 // Accepts number or decimal string; rejects NaN, <= 0, > hard cap.
 function parseAmount(amount, currency) {
@@ -49,6 +55,7 @@ function assertActive(account) {
 }
 
 const actorId = (actor) => (actor && actor.userId && actor.userId !== "system") ? actor.userId : null
+const cleanRef = (v, max = 100) => (v === undefined || v === null) ? null : String(v).trim().slice(0, max) || null
 
 // ── create / read ─────────────────────────────────────────────────
 exports.createAccount = async ({ userId, currency = "TND" }) => {
@@ -78,182 +85,261 @@ exports.getBalance = async (userId) => {
   return payload
 }
 
+exports.listPayees = (filters) => accountRepo.listPayees(filters)
+
 // ── deposit (staff) ───────────────────────────────────────────────
-exports.deposit = async (accountId, amount, { actor = null, note = null } = {}) => {
-  if (!accountId) throw E.validation("accountId is required")
-  // Pre-validate shape before opening a transaction (currency checked again inside).
-  parseAmount(amount, "TND")
+async function depositTx(client, accountId, amount, { actor = null, note = null } = {}) {
+  const account = await accountRepo.getAccountForUpdate(client, accountId)
+  if (!account) throw E.notFound("Account not found")
+  assertActive(account)
 
-  const result = await withTransaction(accountRepo.pool, async (client) => {
-    const account = await accountRepo.getAccountForUpdate(client, accountId)
-    if (!account) throw E.notFound("Account not found")
-    assertActive(account)
+  const currency      = account.currency
+  const depositMoney  = parseAmount(amount, currency)
+  const newMoney      = new Money(account.cached_balance, currency).add(depositMoney)
+  const transactionId = randomUUID()
+  const timestamp     = nowIso()
+  const reference     = cleanRef(note) || `Deposit ${timestamp.slice(0, 10)}`
 
-    const currency     = account.currency
-    const depositMoney = parseAmount(amount, currency)
-    const newMoney     = new Money(account.cached_balance, currency).add(depositMoney)
-    const transactionId = randomUUID()
-    const timestamp     = nowIso()
-    const reference     = note || `Deposit ${timestamp.slice(0, 10)}`
-
-    await ledgerRepo.insertEntry(client, {
-      transactionId, accountId, type: "CREDIT", txType: "DEPOSIT",
-      amount: depositMoney.toFixed(4), balance_snapshot: newMoney.toFixed(4),
-      reference, created_at: timestamp, initiatedBy: actorId(actor),
-    })
-    await accountRepo.updateBalance(client, accountId, newMoney.toFixed(4))
-    await outboxRepo.enqueue(client, {
-      transactionId, topic: TX_TOPIC, partitionKey: accountId,
-      payload: {
-        transactionId, type: "DEPOSIT", accountId,
-        amount: num(depositMoney), currency, balanceSnapshot: num(newMoney),
-        reference, initiatedBy: actorId(actor), timestamp,
-      },
-    })
-    return { transactionId, balance: num(newMoney), currency, userId: account.user_id }
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId, type: "CREDIT", txType: "DEPOSIT",
+    amount: depositMoney.toFixed(4), balance_snapshot: newMoney.toFixed(4),
+    reference, created_at: timestamp, initiatedBy: actorId(actor),
   })
+  await accountRepo.updateBalance(client, accountId, newMoney.toFixed(4))
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: accountId,
+    payload: {
+      transactionId, type: "DEPOSIT", kind: "DEPOSIT", accountId,
+      amount: num(depositMoney), currency, balanceSnapshot: num(newMoney),
+      reference, initiatedBy: actorId(actor), timestamp,
+    },
+  })
+  return { transactionId, balance: num(newMoney), currency, timestamp, _users: [account.user_id] }
+}
 
-  invalidateBalanceFor(result.userId).catch(() => {})
-  const { userId, ...out } = result
-  return out
+exports.deposit = async (accountId, amount, opts = {}) => {
+  if (!accountId) throw E.validation("accountId is required")
+  parseAmount(amount, "TND")
+  const r = await withTransaction(accountRepo.pool, (client) => depositTx(client, accountId, amount, opts))
+  invalidateAll(r._users); delete r._users
+  return r
 }
 
 // ── withdraw (customer, own account) ──────────────────────────────
+async function withdrawTx(client, userId, amount, note) {
+  const account = await accountRepo.getAccountForUpdateByUserId(client, userId)
+  if (!account) throw E.notFound("Account not found")
+  assertActive(account)
+
+  const currency      = account.currency
+  const currentMoney  = new Money(account.cached_balance, currency)
+  const withdrawMoney = parseAmount(amount, currency)
+  let newMoney
+  try { newMoney = currentMoney.subtract(withdrawMoney) }
+  catch { throw E.insufficientFunds(`Insufficient funds: ${currentMoney.toFixed(4)} < ${withdrawMoney.toFixed(4)}`) }
+
+  const transactionId = randomUUID()
+  const timestamp     = nowIso()
+  const reference     = cleanRef(note) || `Withdrawal ${timestamp.slice(0, 10)}`
+
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId: account.id, type: "DEBIT", txType: "WITHDRAW",
+    amount: withdrawMoney.toFixed(4), balance_snapshot: newMoney.toFixed(4),
+    reference, created_at: timestamp, initiatedBy: userId,
+  })
+  await accountRepo.updateBalance(client, account.id, newMoney.toFixed(4))
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: account.id,
+    payload: {
+      transactionId, type: "WITHDRAW", kind: "WITHDRAW", accountId: account.id,
+      amount: num(withdrawMoney), currency, balanceSnapshot: num(newMoney),
+      reference, initiatedBy: userId, timestamp,
+    },
+  })
+  return {
+    transactionId, accountId: account.id,
+    previousBalance: num(currentMoney), newBalance: num(newMoney),
+    amount: num(withdrawMoney), currency, reference: cleanRef(note), timestamp,
+    _users: [userId],
+  }
+}
+
 exports.withdraw = async (userId, amount, note) => {
   if (!userId) throw E.validation("userId is required")
   parseAmount(amount, "TND")
-
-  const result = await withTransaction(accountRepo.pool, async (client) => {
-    const account = await accountRepo.getAccountForUpdateByUserId(client, userId)
-    if (!account) throw E.notFound("Account not found")
-    assertActive(account)
-
-    const currency      = account.currency
-    const currentMoney  = new Money(account.cached_balance, currency)
-    const withdrawMoney = parseAmount(amount, currency)
-    let newMoney
-    try { newMoney = currentMoney.subtract(withdrawMoney) }
-    catch { throw E.insufficientFunds(`Insufficient funds: ${currentMoney.toFixed(4)} < ${withdrawMoney.toFixed(4)}`) }
-
-    const transactionId = randomUUID()
-    const timestamp     = nowIso()
-    const reference     = note || `Withdrawal ${timestamp.slice(0, 10)}`
-
-    await ledgerRepo.insertEntry(client, {
-      transactionId, accountId: account.id, type: "DEBIT", txType: "WITHDRAW",
-      amount: withdrawMoney.toFixed(4), balance_snapshot: newMoney.toFixed(4),
-      reference, created_at: timestamp, initiatedBy: userId,
-    })
-    await accountRepo.updateBalance(client, account.id, newMoney.toFixed(4))
-    await outboxRepo.enqueue(client, {
-      transactionId, topic: TX_TOPIC, partitionKey: account.id,
-      payload: {
-        transactionId, type: "WITHDRAW", accountId: account.id,
-        amount: num(withdrawMoney), currency, balanceSnapshot: num(newMoney),
-        reference, initiatedBy: userId, timestamp,
-      },
-    })
-    return {
-      transactionId, accountId: account.id,
-      previousBalance: num(currentMoney), newBalance: num(newMoney),
-      amount: num(withdrawMoney), currency, reference: note ?? null, timestamp,
-    }
-  })
-
-  invalidateBalanceFor(userId).catch(() => {})
-  return result
+  const r = await withTransaction(accountRepo.pool, (client) => withdrawTx(client, userId, amount, note))
+  invalidateAll(r._users); delete r._users
+  return r
 }
 
-// ── transfer ──────────────────────────────────────────────────────
+// ── move funds (transfer / bill payment / merchant payment) ───────
 // `actor` is the authenticated JWT payload. Customers may only debit their
 // own account; staff may move money between any two accounts.
-exports.transfer = async (sourceAccountId, destinationAccountId, amount, options = {}) => {
-  const { reference = null, actor = null } = options
+async function moveFundsTx(client, sourceAccountId, destinationAccountId, amount, options = {}) {
+  const { reference = null, actor = null, txType = "TRANSFER", counterparty = null } = options
+  if (!ledgerRepo.OUTBOUND_TYPES.includes(txType)) throw E.validation(`Unsupported transaction kind: ${txType}`)
+
+  // Lock both rows in a deterministic order so A→B and B→A cannot deadlock.
+  const locked = await accountRepo.lockAccounts(client, [sourceAccountId, destinationAccountId])
+  const sourceAccount = locked[sourceAccountId]
+  const destAccount   = locked[destinationAccountId]
+  if (!sourceAccount) throw E.notFound("Source account not found")
+  if (!destAccount)   throw E.notFound("Destination account not found")
+
+  if (actor && !isStaff(actor) && sourceAccount.user_id !== actor.userId)
+    throw E.forbidden("You can only transfer from your own account")
+
+  assertActive(sourceAccount)
+  assertActive(destAccount)
+  if (sourceAccount.currency !== destAccount.currency)
+    throw E.currencyMismatch(`Currency mismatch: ${sourceAccount.currency} ≠ ${destAccount.currency}`)
+
+  const currency      = sourceAccount.currency
+  const sourceMoney   = new Money(sourceAccount.cached_balance, currency)
+  const destMoney     = new Money(destAccount.cached_balance, currency)
+  const transferMoney = parseAmount(amount, currency)
+
+  // Daily cap: rolling 24h of outbound debits, checked under the row lock.
+  if (currency === "TND" && DAILY_TRANSFER_LIMIT_TND > 0) {
+    const since   = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
+    const used    = new Money(await ledgerRepo.sumTransferDebitsSince(client, sourceAccountId, since), "TND")
+    const limit   = new Money(DAILY_TRANSFER_LIMIT_TND, "TND")
+    const wouldBe = used.add(transferMoney)
+    if (wouldBe.isGreaterThan(limit))
+      throw E.dailyLimit(
+        `Daily transfer limit exceeded: ${wouldBe.toFixed(4)} TND > ${limit.toFixed(4)} TND ` +
+        `(already used ${used.toFixed(4)} in last 24h)`)
+  }
+
+  let newSourceMoney
+  try { newSourceMoney = sourceMoney.subtract(transferMoney) }
+  catch { throw E.insufficientFunds(`Insufficient funds: ${sourceMoney.toFixed(4)} < ${transferMoney.toFixed(4)}`) }
+  const newDestMoney = destMoney.add(transferMoney)
+
+  const transactionId = randomUUID()
+  const timestamp     = nowIso()
+  const initiatedBy   = actorId(actor)
+  const label     = counterparty?.name || null
+  const debitRef  = cleanRef(reference) || (label ? `${label}` : `Transfer to ${destinationAccountId}`)
+  const creditRef = cleanRef(reference) || `Transfer from ${sourceAccountId}`
+
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId: sourceAccountId, type: "DEBIT", txType,
+    amount: transferMoney.toFixed(4), balance_snapshot: newSourceMoney.toFixed(4),
+    reference: debitRef, created_at: timestamp, initiatedBy,
+  })
+  await ledgerRepo.insertEntry(client, {
+    transactionId, accountId: destinationAccountId, type: "CREDIT", txType,
+    amount: transferMoney.toFixed(4), balance_snapshot: newDestMoney.toFixed(4),
+    reference: creditRef, created_at: timestamp, initiatedBy,
+  })
+  await accountRepo.updateBalance(client, sourceAccountId,      newSourceMoney.toFixed(4))
+  await accountRepo.updateBalance(client, destinationAccountId, newDestMoney.toFixed(4))
+
+  const common = { transactionId, kind: txType, amount: num(transferMoney), currency, initiatedBy, timestamp,
+                   counterparty: counterparty ? { code: counterparty.code, name: counterparty.name } : null }
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: sourceAccountId,
+    payload: { ...common, type: "TRANSFER_DEBIT", accountId: sourceAccountId,
+               counterpartyAccountId: destinationAccountId, balanceSnapshot: num(newSourceMoney), reference: debitRef },
+  })
+  await outboxRepo.enqueue(client, {
+    transactionId, topic: TX_TOPIC, partitionKey: destinationAccountId,
+    payload: { ...common, type: "TRANSFER_CREDIT", accountId: destinationAccountId,
+               counterpartyAccountId: sourceAccountId, balanceSnapshot: num(newDestMoney), reference: creditRef },
+  })
+
+  return {
+    transactionId, kind: txType,
+    source:      { accountId: sourceAccountId,      previousBalance: num(sourceMoney), newBalance: num(newSourceMoney) },
+    destination: { accountId: destinationAccountId, previousBalance: num(destMoney),   newBalance: num(newDestMoney) },
+    amount: num(transferMoney), currency, reference: cleanRef(reference), timestamp,
+    counterparty: counterparty ? { code: counterparty.code, name: counterparty.name, accountId: destinationAccountId } : null,
+    _users: [sourceAccount.user_id, destAccount.user_id],
+  }
+}
+
+function validateMove(sourceAccountId, destinationAccountId, amount, reference) {
   if (!sourceAccountId || !destinationAccountId) throw E.validation("Both source and destination account IDs are required")
   if (sourceAccountId === destinationAccountId)  throw E.validation("Cannot transfer to the same account")
   parseAmount(amount, "TND")
   if (reference && String(reference).length > 100) throw E.validation("reference must be at most 100 characters")
+}
+
+exports.transfer = async (sourceAccountId, destinationAccountId, amount, options = {}) => {
+  validateMove(sourceAccountId, destinationAccountId, amount, options.reference)
+  const r = await withTransaction(accountRepo.pool, (client) =>
+    moveFundsTx(client, sourceAccountId, destinationAccountId, amount, { ...options, txType: "TRANSFER" }))
+  invalidateAll(r._users); delete r._users
+  return r
+}
+
+// ── unified POST /transactions ────────────────────────────────────
+// kinds: TRANSFER | BILL_PAYMENT | MERCHANT_PAYMENT | WITHDRAW
+// Optional idempotency key: the first request with a key owns it; retries
+// replay the stored response; a concurrent duplicate gets 409.
+const KINDS = ["TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT", "WITHDRAW"]
+
+exports.createTransaction = async (actor, body = {}, idempotencyKey = null) => {
+  if (!actor?.userId) throw E.forbidden("Authentication required")
+  const kind = String(body.kind || "").toUpperCase()
+  if (!KINDS.includes(kind)) throw E.validation(`kind must be one of ${KINDS.join(", ")}`)
+  parseAmount(body.amount, "TND")
+  if (idempotencyKey !== null && !/^[\w.:-]{8,128}$/.test(idempotencyKey))
+    throw E.validation("Idempotency-Key must be 8-128 chars [A-Za-z0-9_.:-]")
 
   const result = await withTransaction(accountRepo.pool, async (client) => {
-    // Lock both rows in a deterministic order so A→B and B→A cannot deadlock.
-    const locked = await accountRepo.lockAccounts(client, [sourceAccountId, destinationAccountId])
-    const sourceAccount = locked[sourceAccountId]
-    const destAccount   = locked[destinationAccountId]
-    if (!sourceAccount) throw E.notFound("Source account not found")
-    if (!destAccount)   throw E.notFound("Destination account not found")
-
-    if (actor && !isStaff(actor) && sourceAccount.user_id !== actor.userId)
-      throw E.forbidden("You can only transfer from your own account")
-
-    assertActive(sourceAccount)
-    assertActive(destAccount)
-    if (sourceAccount.currency !== destAccount.currency)
-      throw E.currencyMismatch(`Currency mismatch: ${sourceAccount.currency} ≠ ${destAccount.currency}`)
-
-    const currency      = sourceAccount.currency
-    const sourceMoney   = new Money(sourceAccount.cached_balance, currency)
-    const destMoney     = new Money(destAccount.cached_balance, currency)
-    const transferMoney = parseAmount(amount, currency)
-
-    // Daily cap: rolling 24h of outgoing TRANSFER debits, checked under the row lock.
-    if (currency === "TND" && DAILY_TRANSFER_LIMIT_TND > 0) {
-      const since   = new Date(Date.now() - 24 * 3600 * 1000).toISOString()
-      const used    = new Money(await ledgerRepo.sumTransferDebitsSince(client, sourceAccountId, since), "TND")
-      const limit   = new Money(DAILY_TRANSFER_LIMIT_TND, "TND")
-      const wouldBe = used.add(transferMoney)
-      if (wouldBe.isGreaterThan(limit))
-        throw E.dailyLimit(
-          `Daily transfer limit exceeded: ${wouldBe.toFixed(4)} TND > ${limit.toFixed(4)} TND ` +
-          `(already used ${used.toFixed(4)} in last 24h)`)
+    if (idempotencyKey) {
+      const claim = await accountRepo.claimIdempotencyKey(client, actor.userId, idempotencyKey)
+      if (!claim.claimed) {
+        if (claim.response) return { ...claim.response, replayed: true, _users: [] }
+        throw E.conflict("IDEMPOTENT_IN_PROGRESS", "A request with this Idempotency-Key is still being processed")
+      }
     }
 
-    let newSourceMoney
-    try { newSourceMoney = sourceMoney.subtract(transferMoney) }
-    catch { throw E.insufficientFunds(`Insufficient funds: ${sourceMoney.toFixed(4)} < ${transferMoney.toFixed(4)}`) }
-    const newDestMoney = destMoney.add(transferMoney)
+    let out
+    if (kind === "WITHDRAW") {
+      const w = await withdrawTx(client, actor.userId, body.amount, body.note ?? body.reference)
+      out = { transactionId: w.transactionId, kind, amount: w.amount, currency: w.currency,
+              newBalance: w.newBalance, reference: w.reference, timestamp: w.timestamp, counterparty: null, _users: w._users }
+    } else {
+      const source = await accountRepo.findByUserId(actor.userId, client)
+      if (!source) throw E.notFound("Account not found")
 
-    const transactionId = randomUUID()
-    const timestamp     = nowIso()
-    const initiatedBy   = actorId(actor)
-    const debitRef  = reference || `Transfer to ${destinationAccountId}`
-    const creditRef = reference || `Transfer from ${sourceAccountId}`
+      let destinationAccountId, counterparty = null, reference = body.reference
+      if (kind === "TRANSFER") {
+        destinationAccountId = body.destinationAccountId
+      } else {
+        const code = body.payeeCode || body.billerCode || body.merchantCode
+        if (!code) throw E.validation("payeeCode is required")
+        const payee = await accountRepo.findPayeeByCode(code, client)
+        if (!payee) throw E.notFound(`Unknown payee: ${code}`)
+        const expected = kind === "BILL_PAYMENT" ? "BILLER" : "MERCHANT"
+        if (payee.kind !== expected) throw E.validation(`${payee.code} is a ${payee.kind.toLowerCase()}, not valid for ${kind}`)
+        if (kind === "BILL_PAYMENT" && !cleanRef(body.referenceNumber, 64))
+          throw E.validation("referenceNumber is required for bill payments")
+        destinationAccountId = payee.account_id
+        counterparty = { code: payee.code, name: payee.name }
+        const refNo = cleanRef(body.referenceNumber, 64)
+        reference = refNo ? `${payee.name} · ${refNo}` : (cleanRef(body.reference) ? `${payee.name} · ${cleanRef(body.reference)}` : payee.name)
+      }
 
-    await ledgerRepo.insertEntry(client, {
-      transactionId, accountId: sourceAccountId, type: "DEBIT", txType: "TRANSFER",
-      amount: transferMoney.toFixed(4), balance_snapshot: newSourceMoney.toFixed(4),
-      reference: debitRef, created_at: timestamp, initiatedBy,
-    })
-    await ledgerRepo.insertEntry(client, {
-      transactionId, accountId: destinationAccountId, type: "CREDIT", txType: "TRANSFER",
-      amount: transferMoney.toFixed(4), balance_snapshot: newDestMoney.toFixed(4),
-      reference: creditRef, created_at: timestamp, initiatedBy,
-    })
-    await accountRepo.updateBalance(client, sourceAccountId,      newSourceMoney.toFixed(4))
-    await accountRepo.updateBalance(client, destinationAccountId, newDestMoney.toFixed(4))
-
-    const common = { transactionId, amount: num(transferMoney), currency, initiatedBy, timestamp }
-    await outboxRepo.enqueue(client, {
-      transactionId, topic: TX_TOPIC, partitionKey: sourceAccountId,
-      payload: { ...common, type: "TRANSFER_DEBIT", accountId: sourceAccountId,
-                 counterpartyAccountId: destinationAccountId, balanceSnapshot: num(newSourceMoney), reference: debitRef },
-    })
-    await outboxRepo.enqueue(client, {
-      transactionId, topic: TX_TOPIC, partitionKey: destinationAccountId,
-      payload: { ...common, type: "TRANSFER_CREDIT", accountId: destinationAccountId,
-                 counterpartyAccountId: sourceAccountId, balanceSnapshot: num(newDestMoney), reference: creditRef },
-    })
-
-    return {
-      transactionId,
-      source:      { accountId: sourceAccountId,      previousBalance: num(sourceMoney), newBalance: num(newSourceMoney) },
-      destination: { accountId: destinationAccountId, previousBalance: num(destMoney),   newBalance: num(newDestMoney) },
-      amount: num(transferMoney), currency, reference, timestamp,
-      _users: [sourceAccount.user_id, destAccount.user_id],
+      validateMove(source.id, destinationAccountId, body.amount, reference)
+      const m = await moveFundsTx(client, source.id, destinationAccountId, body.amount,
+        { reference, actor, txType: kind, counterparty })
+      out = { transactionId: m.transactionId, kind, amount: m.amount, currency: m.currency,
+              newBalance: m.source.newBalance, reference: m.reference ?? reference, timestamp: m.timestamp,
+              counterparty: m.counterparty || { accountId: destinationAccountId }, _users: m._users }
     }
+
+    if (idempotencyKey) {
+      const { _users, ...stored } = out
+      await accountRepo.storeIdempotentResponse(client, actor.userId, idempotencyKey, stored)
+    }
+    return out
   })
 
-  for (const u of result._users) invalidateBalanceFor(u).catch(() => {})
-  delete result._users
+  invalidateAll(result._users); delete result._users
   return result
 }
 
@@ -337,9 +423,8 @@ exports.cancelTransaction = async (originalTransactionId, { reason, cancelledBy 
     }
   })
 
-  for (const u of result._users) invalidateBalanceFor(u).catch(() => {})
-  delete result._users
+  invalidateAll(result._users); delete result._users
   return result
 }
 
-exports._internal = { parseAmount, balanceKey }
+exports._internal = { parseAmount, balanceKey, KINDS }

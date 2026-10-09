@@ -29,7 +29,7 @@ exports.listForAccount = async (accountId, filters = {}) => {
   if (minAmount !== undefined && minAmount !== "") { const v = Number(minAmount); if (!Number.isFinite(v)) throw E.validation("minAmount must be numeric"); params.push(v); sql += ` AND amount >= $${params.length}` }
   if (maxAmount !== undefined && maxAmount !== "") { const v = Number(maxAmount); if (!Number.isFinite(v)) throw E.validation("maxAmount must be numeric"); params.push(v); sql += ` AND amount <= $${params.length}` }
   if (initiatedBy === "staff")    sql += ` AND tx_type IN ('DEPOSIT','CANCELLATION')`
-  if (initiatedBy === "customer") sql += ` AND tx_type IN ('WITHDRAW','TRANSFER')`
+  if (initiatedBy === "customer") sql += ` AND tx_type IN ('WITHDRAW','TRANSFER','BILL_PAYMENT','MERCHANT_PAYMENT')`
 
   const safeOrder  = VALID_ORDERS.includes(String(order).toUpperCase()) ? String(order).toUpperCase() : "DESC"
   const safeLimit  = Math.min(Math.max(parseInt(limit, 10) || 20, 1), MAX_LIMIT)
@@ -50,7 +50,7 @@ exports.getTransaction = async (userId, txId) => {
   return formatTx(tx)
 }
 
-const INITIATOR = { DEPOSIT: "Staff", CANCELLATION: "Staff", WITHDRAW: "Customer", TRANSFER: "Customer" }
+const INITIATOR = { DEPOSIT: "Staff", CANCELLATION: "Staff", WITHDRAW: "Customer", TRANSFER: "Customer", BILL_PAYMENT: "Customer", MERCHANT_PAYMENT: "Customer" }
 
 const formatTx = (tx) => ({
   id:              tx.id,

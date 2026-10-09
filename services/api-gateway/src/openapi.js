@@ -67,7 +67,7 @@ module.exports = {
         properties: {
           id: uuid, transactionId: uuid, accountId: uuid,
           type: { type: "string", enum: ["CREDIT", "DEBIT"] },
-          txType: { type: "string", enum: ["DEPOSIT", "WITHDRAW", "TRANSFER", "CANCELLATION"] },
+          txType: { type: "string", enum: ["DEPOSIT", "WITHDRAW", "TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT", "CANCELLATION"] },
           amount: { type: "number" }, balanceSnapshot: { type: "number" }, reference: { type: "string", nullable: true },
           compensates: { ...uuid, nullable: true, description: "Original ledger row this entry reverses" },
           createdAt: { type: "string", format: "date-time" }, initiatedBy: { type: "string", enum: ["Staff", "Customer"] },
@@ -145,7 +145,28 @@ module.exports = {
     "/accounts/verify/{id}": { get: { tags: ["account"], summary: "Verify a recipient account before transferring (non-sensitive fields only)", parameters: [idParam()],
       responses: { "200": ok("OK", { type: "object", properties: { accountId: uuid, name: { type: "string" }, currency: { type: "string" }, status: { type: "string" } } }), "404": err("Not found") } } },
 
-    "/transactions": { get: { tags: ["transactions"], summary: "List the caller's ledger entries",
+    "/payees": { get: { tags: ["transactions"], summary: "Billers and merchants that can be paid", parameters: [{ name: "kind", in: "query", schema: { type: "string", enum: ["BILLER", "MERCHANT"] } }],
+      responses: { "200": ok("OK", { type: "object", properties: { payees: { type: "array", items: { type: "object", properties: { code: { type: "string" }, name: { type: "string" }, kind: { type: "string" }, category: { type: "string" }, referenceHint: { type: "string" } } } } } }) } } },
+    "/transactions": {
+      post: { tags: ["transactions"], summary: "Create a transaction from the caller's own account (unified endpoint)",
+        description: "`kind` selects the flow: TRANSFER (destinationAccountId), BILL_PAYMENT (payeeCode + referenceNumber), MERCHANT_PAYMENT (payeeCode), WITHDRAW. Send an `Idempotency-Key` header (8-128 chars) to make retries safe: the stored response is replayed with HTTP 200 and `replayed: true`.",
+        parameters: [{ name: "Idempotency-Key", in: "header", required: false, schema: { type: "string", pattern: "^[\\w.:-]{8,128}$" } }],
+        requestBody: { required: true, content: { "application/json": { schema: {
+          type: "object", required: ["kind", "amount"],
+          properties: {
+            kind: { type: "string", enum: ["TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT", "WITHDRAW"] },
+            amount: { oneOf: [{ type: "number" }, { type: "string" }], example: "45.0000" },
+            destinationAccountId: { ...uuid, description: "TRANSFER only" },
+            payeeCode: { type: "string", example: "STEG", description: "BILL_PAYMENT / MERCHANT_PAYMENT" },
+            referenceNumber: { type: "string", maxLength: 64, description: "Contract / invoice / order number (required for bills)" },
+            reference: { type: "string", maxLength: 100 }, note: { type: "string", maxLength: 100, description: "WITHDRAW" },
+          } } } } },
+        responses: {
+          "201": ok("Created", { type: "object", properties: { success: { type: "boolean" }, data: { type: "object", properties: { transactionId: uuid, kind: { type: "string" }, amount: { type: "number" }, currency: { type: "string" }, newBalance: { type: "number" }, reference: { type: "string", nullable: true }, timestamp: { type: "string", format: "date-time" }, counterparty: { type: "object", nullable: true, properties: { code: { type: "string" }, name: { type: "string" }, accountId: uuid } } } } } }),
+          "200": ok("Replayed from Idempotency-Key"), "400": err("Validation"), "403": err("Not your account"), "404": err("Payee / destination not found"),
+          "409": err("IDEMPOTENT_IN_PROGRESS"), "422": err("Insufficient funds / inactive"), "429": err("Daily limit"),
+        } },
+      get: { tags: ["transactions"], summary: "List the caller's ledger entries",
       parameters: [
         { name: "type", in: "query", schema: { type: "string", enum: ["CREDIT", "DEBIT"] } },
         { name: "txType", in: "query", schema: { type: "string", enum: ["DEPOSIT", "WITHDRAW", "TRANSFER", "CANCELLATION"] } },
@@ -155,7 +176,8 @@ module.exports = {
         { name: "limit", in: "query", schema: { type: "integer", maximum: 100, default: 20 } }, { name: "offset", in: "query", schema: { type: "integer", default: 0 } },
         { name: "order", in: "query", schema: { type: "string", enum: ["ASC", "DESC"], default: "DESC" } },
       ],
-      responses: { "200": ok("OK", { type: "object", properties: { transactions: { type: "array", items: { $ref: "#/components/schemas/Transaction" } }, count: { type: "integer" } } }), "400": err("Bad filter") } } },
+      responses: { "200": ok("OK", { type: "object", properties: { transactions: { type: "array", items: { $ref: "#/components/schemas/Transaction" } }, count: { type: "integer" } } }), "400": err("Bad filter") } },
+    },
     "/transactions/export": { get: { tags: ["transactions"], summary: "Export the caller's statement (CSV, or print-ready HTML)", parameters: [{ name: "format", in: "query", schema: { type: "string", enum: ["csv", "pdf"], default: "csv" } }],
       responses: { "200": { description: "text/csv or text/html" }, "400": err("Unsupported format") } } },
     "/transactions/{id}": { get: { tags: ["transactions"], summary: "Read one ledger entry (must belong to the caller)", parameters: [idParam()],

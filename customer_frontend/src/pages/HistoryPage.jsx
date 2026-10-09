@@ -76,11 +76,11 @@ const exportCSV = (transactions) => {
     const type = normalizeType(tx.type);
     return [
       tx.id,
-      fmtDate(tx.created_at),
+      fmtDate((tx.createdAt ?? tx.created_at)),
       tx.reference ?? "",
       type.charAt(0).toUpperCase() + type.slice(1),
       (type === "credit" ? "+" : "-") + parseFloat(tx.amount).toFixed(3),
-      tx.balance_snapshot ? parseFloat(tx.balance_snapshot).toFixed(3) : "",
+      (tx.balanceSnapshot ?? tx.balance_snapshot) ? parseFloat((tx.balanceSnapshot ?? tx.balance_snapshot)).toFixed(3) : "",
       "TND",
     ];
   });
@@ -100,13 +100,13 @@ const exportPDF = (transactions) => {
     const isCredit = type === "credit";
       return `
       <tr>
-        <td>${fmtDate(tx.created_at)}</td>
+        <td>${fmtDate((tx.createdAt ?? tx.created_at))}</td>
         <td>${tx.reference ?? "—"}</td>
         <td class="${type}">${isCredit ? "Credit" : "Debit"}</td>
         <td style="text-align:right" class="${type}">
           ${isCredit ? "+" : "−"}${fmt(tx.amount)} TND
         </td>
-        <td style="text-align:right;color:#555">${tx.balance_snapshot ? fmt(tx.balance_snapshot) + " TND" : "—"}</td>
+        <td style="text-align:right;color:#555">${(tx.balanceSnapshot ?? tx.balance_snapshot) ? fmt((tx.balanceSnapshot ?? tx.balance_snapshot)) + " TND" : "—"}</td>
       </tr>`;
   }).join("");
 
@@ -190,10 +190,10 @@ const TransactionModal = ({ tx, onClose }) => {
         <div style={{ padding:"24px 32px" }}>
           {[
             { label:"Transaction ID",  value:tx.id,                                    mono:true   },
-            { label:"Date",            value:fmtDateLong(tx.created_at)                             },
-            { label:"Time",            value:fmtTime(tx.created_at)                                 },
+            { label:"Date",            value:fmtDateLong((tx.createdAt ?? tx.created_at))                             },
+            { label:"Time",            value:fmtTime((tx.createdAt ?? tx.created_at))                                 },
             { label:"Type",            value:cfg.badgeLabel,        color:cfg.badgeColor            },
-            { label:"Balance After",   value:tx.balance_snapshot ? fmt(tx.balance_snapshot)+" TND" : "—" },
+            { label:"Balance After",   value:(tx.balanceSnapshot ?? tx.balance_snapshot) ? fmt((tx.balanceSnapshot ?? tx.balance_snapshot))+" TND" : "—" },
             { label:"Initiated By",    value:tx.performed_by ? "Staff" : "Customer"                 },
           ].map(({ label, value, color, mono }) => (
             <div key={label} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"11px 0", borderBottom:`1px solid ${tk.creamBorder}` }}>
@@ -284,11 +284,11 @@ const TransactionHistory = () => {
     }
     if (filters.type !== "all" && type !== filters.type) return false;
     if (filters.dateFrom) {
-      const d = new Date(tx.created_at);
+      const d = new Date((tx.createdAt ?? tx.created_at));
       if (d < new Date(filters.dateFrom)) return false;
     }
     if (filters.dateTo) {
-      const d  = new Date(tx.created_at);
+      const d  = new Date((tx.createdAt ?? tx.created_at));
       const to = new Date(filters.dateTo);
       to.setHours(23, 59, 59);
       if (d > to) return false;
@@ -474,7 +474,7 @@ const TransactionHistory = () => {
                   <div style={{ fontSize:13, color:tk.navy, fontWeight:500, marginBottom:3 }}>
                     {tx.reference ?? "—"}
                   </div>
-                  <div style={{ fontSize:11, color:"#bbb" }}>{fmtDate(tx.created_at)}</div>
+                  <div style={{ fontSize:11, color:"#bbb" }}>{fmtDate((tx.createdAt ?? tx.created_at))}</div>
                 </div>
 
                 {/* ID */}

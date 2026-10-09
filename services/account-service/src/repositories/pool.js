@@ -13,6 +13,8 @@ const T = {
   ledger:     "ledger_db.public.ledger_entries",
   outbox:     "ledger_db.public.event_outbox",
   cancelled:  "ledger_db.public.cancelled_transactions",
+  payees:     "account_db.public.payees",
+  idem:       "ledger_db.public.idempotency_keys",
 }
 
 module.exports = { pool, T }

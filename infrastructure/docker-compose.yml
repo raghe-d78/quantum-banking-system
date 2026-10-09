@@ -275,6 +275,7 @@ services:
       TX_CANCELLED_TOPIC: transaction.cancelled
       FRAUD_GROUP_ID: fraud-workers
       FRAUD_MODELS_DIR: /app/models
+      FRAUD_QUANTUM_WEIGHT: ${FRAUD_QUANTUM_WEIGHT:-0.3}
     volumes:
       - fraud_models:/app/models
     depends_on:

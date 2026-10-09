@@ -35,19 +35,29 @@ def test_risk_level_thresholds():
     assert risk_level(1.50) == "Critical"   # clamped
 
 
-def test_decide_uses_max():
+def test_decide_blends_scores():
+    from src.risk import QUANTUM_WEIGHT, blend
     v = decide(0.10, 0.80, "lr-v1", "vqc-v1")
-    assert v.decision_score == 0.80
-    assert v.risk == "Critical"
+    assert v.decision_score == blend(0.10, 0.80)
+    assert abs(v.decision_score - ((1 - QUANTUM_WEIGHT) * 0.10 + QUANTUM_WEIGHT * 0.80)) < 1e-9
     assert v.classical_model == "lr-v1"
     assert v.quantum_model == "vqc-v1"
+
+
+def test_uninformative_quantum_does_not_flag_benign_traffic():
+    # VQC ≈ 0.5 on everything (AUC≈0.5) must not turn a clean classical verdict into an alert
+    assert decide(0.02, 0.50, "lr", "vqc").risk == "Low"
+    # …but a confident classical verdict is still escalated
+    assert decide(0.95, 0.50, "lr", "vqc").risk in ("High", "Critical")
+    # …and a confident quantum verdict lifts a borderline classical one
+    assert decide(0.40, 0.95, "lr", "vqc").risk == "High"
 
 
 def test_event_payload_shape():
     v = decide(0.10, 0.80, "lr-v1", "vqc-v1")
     e = v.to_event("tx1", "acc1", "2024-01-01T00:00:00Z", "v1")
     assert e["transactionId"] == "tx1"
-    assert e["riskLevel"] == "Critical"
-    assert e["decisionPolicy"] == "max(classical, quantum)"
+    assert e["riskLevel"] == "Medium"
+    assert e["decisionPolicy"].startswith("blend(")
     assert e["classical"]["modelVersion"] == "lr-v1"
     assert e["quantum"]["score"] == 0.80

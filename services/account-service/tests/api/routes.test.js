@@ -3,7 +3,7 @@ const { installRepoMocks } = require("../helpers/mocks")
 installRepoMocks()
 jest.doMock("../../src/account.service", () => ({
   createAccount: jest.fn(), getBalance: jest.fn(), deposit: jest.fn(), withdraw: jest.fn(),
-  transfer: jest.fn(), cancelTransaction: jest.fn(),
+  transfer: jest.fn(), cancelTransaction: jest.fn(), createTransaction: jest.fn(), listPayees: jest.fn(),
 }))
 jest.doMock("axios", () => ({ get: jest.fn(), post: jest.fn() }))
 
@@ -125,6 +125,27 @@ describe("GET /accounts/verify/:id", () => {
     expect(res.statusCode).toBe(200)
     expect(res.body).toEqual({ accountId: "acc-1", name: "Account acc-1", currency: "TND", status: "ACTIVE" })
     expect(res.body).not.toHaveProperty("balance")
+  })
+})
+
+describe("POST /transactions + GET /payees", () => {
+  test("forwards actor, body and Idempotency-Key; 201 on create, 200 on replay", async () => {
+    svc.createTransaction.mockResolvedValueOnce({ transactionId: "t1", kind: "WITHDRAW" })
+    let res = await request(app).post("/transactions").set("Authorization", `Bearer ${tok("customer", "u-7")}`).set("Idempotency-Key", "k-12345678").send({ kind: "WITHDRAW", amount: "5" })
+    expect(res.statusCode).toBe(201)
+    expect(svc.createTransaction).toHaveBeenCalledWith(expect.objectContaining({ userId: "u-7" }), { kind: "WITHDRAW", amount: "5" }, "k-12345678")
+    svc.createTransaction.mockResolvedValueOnce({ transactionId: "t1", replayed: true })
+    res = await request(app).post("/transactions").set("Authorization", `Bearer ${tok("customer", "u-7")}`).send({ kind: "WITHDRAW", amount: "5" })
+    expect(res.statusCode).toBe(200)
+    expect(svc.createTransaction.mock.calls[1][2]).toBeNull()
+  })
+  test("payees are listed for any authenticated role", async () => {
+    svc.listPayees.mockResolvedValue([{ code: "STEG", name: "STEG", kind: "BILLER", category: "Utilities", reference_hint: "Contract" }])
+    const res = await request(app).get("/payees?kind=BILLER").set("Authorization", `Bearer ${tok("customer")}`)
+    expect(res.statusCode).toBe(200)
+    expect(res.body.payees[0]).toEqual({ code: "STEG", name: "STEG", kind: "BILLER", category: "Utilities", referenceHint: "Contract" })
+    expect(svc.listPayees).toHaveBeenCalledWith({ kind: "BILLER" })
+    expect((await request(app).get("/payees")).statusCode).toBe(401)
   })
 })
 

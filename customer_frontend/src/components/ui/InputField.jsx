@@ -1,7 +1,7 @@
 // src/components/ui/InputField.jsx
 // Reusable input — use across Login, Register, and any other form
 
-export default function InputField({ label, type = "text", placeholder, value, onChange }) {
+export default function InputField({ label, type = "text", placeholder, value, onChange, ...rest }) {
   return (
     <div style={styles.wrapper}>
       <label style={styles.label}>{label}</label>
@@ -11,6 +11,7 @@ export default function InputField({ label, type = "text", placeholder, value, o
         value={value}
         onChange={onChange}
         style={styles.input}
+        {...rest}
       />
     </div>
   );

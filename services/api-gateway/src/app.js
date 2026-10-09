@@ -37,7 +37,7 @@ const corsOptions = {
   origin: (origin, cb) => (!origin || allowedOrigins.includes(origin)) ? cb(null, true) : cb(new Error("CORS origin denied")),
   credentials: true,
   methods: "GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS",
-  allowedHeaders: "Origin,X-Requested-With,Content-Type,Accept,Authorization,X-Request-Id",
+  allowedHeaders: "Origin,X-Requested-With,Content-Type,Accept,Authorization,X-Request-Id,Idempotency-Key",
   exposedHeaders: "X-Request-Id,RateLimit-Limit,RateLimit-Remaining,RateLimit-Reset,Content-Disposition",
   maxAge: 600,
 }
@@ -110,6 +110,7 @@ const fwdHeaders = (req) => ({
   Authorization: req.headers.authorization || "",
   "X-Request-Id": req.id,
   "X-Forwarded-For": req.ip,
+  ...(req.headers["idempotency-key"] ? { "Idempotency-Key": req.headers["idempotency-key"] } : {}),
 })
 
 // Generic JSON proxy. Keeps upstream status + body; network errors → 502.
@@ -178,6 +179,8 @@ app.get("/balance",                 proxy(U.account))
 app.post("/withdraw",               proxy(U.account, { timeout: 15000 }))
 app.post("/transfer",               proxy(U.account, { timeout: 15000 }))
 app.get("/accounts/verify/:id",     proxy(U.account))
+app.get("/payees",                  proxy(U.account))
+app.post("/transactions",           proxy(U.account, { timeout: 15000 }))
 app.get("/transactions",            proxy(U.account))
 app.get("/transactions/export",     proxyRaw(U.account, { timeout: 30000 }))
 app.get("/transactions/:id",        proxy(U.account))

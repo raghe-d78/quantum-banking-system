@@ -16,7 +16,7 @@ const PORT     = process.env.PORT || 3006
 const QSVC     = process.env.QUANTUM_SERVICE_URL || "http://quantum-service:3005"
 const TTL_SEC  = Number(process.env.KEY_TTL_SEC || 300)
 const ROUNDS   = Number(process.env.KEY_ROUNDS || 3)
-const QUBITS   = Number(process.env.KEY_QUBITS || 512)
+const QUBITS   = Number(process.env.KEY_QUBITS || 1024)   // ~50% sifted, 25% sampled → ≥ 256 key bits with margin
 
 const app = express()
 app.disable("x-powered-by")

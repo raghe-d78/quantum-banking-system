@@ -45,7 +45,7 @@ export default function LoginPage() {
 
           <div style={styles.divider} />
 
-          <h1 style={styles.title}>Sign In</h1>
+          <h1 style={styles.title}>Welcome back</h1>
           <p style={styles.subtitle}>Enter your credentials to access your account</p>
 
           <div style={styles.fields}>
@@ -86,7 +86,7 @@ export default function LoginPage() {
                 <span style={styles.spinner} />
                 Signing in…
               </span>
-            ) : "Confirm"}
+            ) : "Sign in"}
           </button>
 
           <p style={styles.footerNote}>Protected by 256-bit encryption · Banque © 2026</p>

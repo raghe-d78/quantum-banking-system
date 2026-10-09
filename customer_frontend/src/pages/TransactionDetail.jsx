@@ -9,7 +9,7 @@ import api from "../lib/api";
 // GET /transactions/:id returns the ledger row for the caller's own account:
 // { id, transactionId, accountId, type: CREDIT|DEBIT, txType, amount,
 //   balanceSnapshot, reference, compensates, createdAt, initiatedBy }
-const TX_TYPE_LABEL = { DEPOSIT:"Deposit", WITHDRAW:"Withdrawal", TRANSFER:"Transfer", CANCELLATION:"Reversal" };
+const TX_TYPE_LABEL = { DEPOSIT:"Deposit", WITHDRAW:"Withdrawal", TRANSFER:"Transfer", BILL_PAYMENT:"Bill payment", MERCHANT_PAYMENT:"Purchase", CANCELLATION:"Reversal" };
 const toViewModel = (t) => {
   const created = new Date(t.createdAt);
   const type = String(t.type).toLowerCase() === "credit" ? "credit" : "debit";

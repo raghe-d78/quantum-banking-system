@@ -102,9 +102,17 @@ describe("proxy behaviour", () => {
     expect(res.headers["content-disposition"]).toMatch(/attachment/)
     expect(res.text).toBe("a,b")
   })
-  test("unknown route → 404 JSON; legacy POST /transactions is gone", async () => {
+  test("unknown route → 404 JSON", async () => {
     expect((await request(app).get("/nope").set(auth)).statusCode).toBe(404)
-    expect((await request(app).post("/transactions").set(auth).send({})).statusCode).toBe(404)
+  })
+  test("POST /transactions forwards body and Idempotency-Key", async () => {
+    upstream(201, { success: true })
+    const res = await request(app).post("/transactions").set(auth).set("Idempotency-Key", "abc-12345678").send({ kind: "WITHDRAW", amount: "5" })
+    expect(res.statusCode).toBe(201)
+    const cfg = axios.mock.calls[0][0]
+    expect(cfg.url).toMatch(/account-service:3002\/transactions$/)
+    expect(cfg.headers["Idempotency-Key"]).toBe("abc-12345678")
+    expect(cfg.data).toEqual({ kind: "WITHDRAW", amount: "5" })
   })
   test("security headers present", async () => {
     const res = await request(app).get("/health")

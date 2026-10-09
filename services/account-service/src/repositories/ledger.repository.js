@@ -3,7 +3,9 @@
 const { randomUUID } = require("crypto")
 const { pool, T } = require("./pool")
 
-const TX_TYPES = ["DEPOSIT", "WITHDRAW", "TRANSFER", "CANCELLATION"]
+const TX_TYPES = ["DEPOSIT", "WITHDRAW", "TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT", "CANCELLATION"]
+// Customer-initiated outbound kinds that count against the daily cap.
+const OUTBOUND_TYPES = ["TRANSFER", "BILL_PAYMENT", "MERCHANT_PAYMENT"]
 
 async function insertEntry(client, entry) {
   const {
@@ -28,15 +30,15 @@ async function insertEntry(client, entry) {
   return rows[0]
 }
 
-// Rolling-window sum of outgoing TRANSFER debits only (deposits, withdrawals
-// and compensations must not eat into the customer's transfer allowance).
+// Rolling-window sum of outbound debits (transfers + payments). Deposits,
+// withdrawals and compensations must not eat into the customer's allowance.
 async function sumTransferDebitsSince(client, accountId, sinceIso) {
   const { rows } = await client.query(
     `SELECT COALESCE(SUM(amount), 0)::STRING AS total
        FROM ${T.ledger}
-      WHERE account_id = $1 AND type = 'DEBIT' AND tx_type = 'TRANSFER'
+      WHERE account_id = $1 AND type = 'DEBIT' AND tx_type = ANY($3)
         AND compensates IS NULL AND created_at >= $2`,
-    [accountId, sinceIso]
+    [accountId, sinceIso, OUTBOUND_TYPES]
   )
   return rows[0]?.total ?? "0"
 }
@@ -60,4 +62,4 @@ async function findById(id, client) {
   return rows[0]
 }
 
-module.exports = { pool, TX_TYPES, insertEntry, sumTransferDebitsSince, findByTransactionId, findById }
+module.exports = { pool, TX_TYPES, OUTBOUND_TYPES, insertEntry, sumTransferDebitsSince, findByTransactionId, findById }

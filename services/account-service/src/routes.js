@@ -75,6 +75,21 @@ router.get("/accounts/verify/:accountId", authenticate, wrap(async (req, res) =>
   })
 }))
 
+// ── payees (billers / merchants) ──────────────────────────────────
+router.get("/payees", authenticate, wrap(async (req, res) => {
+  const payees = await accountService.listPayees({ kind: req.query.kind })
+  res.json({ payees: payees.map(p => ({ code: p.code, name: p.name, kind: p.kind, category: p.category, referenceHint: p.reference_hint })) })
+}))
+
+// ── unified transaction creation ──────────────────────────────────
+// Body: { kind: TRANSFER|BILL_PAYMENT|MERCHANT_PAYMENT|WITHDRAW, amount, … }
+// Optional header Idempotency-Key makes retries safe.
+router.post("/transactions", authenticate, wrap(async (req, res) => {
+  const key = req.get("Idempotency-Key") || null
+  const result = await accountService.createTransaction(req.user, req.body || {}, key)
+  res.status(result.replayed ? 200 : 201).json({ success: true, data: result })
+}))
+
 // ── transactions (read side) ──────────────────────────────────────
 router.get("/transactions", authenticate, wrap(async (req, res) => {
   const txs = await txService.listTransactions(req.user.userId, req.query)

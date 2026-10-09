@@ -1,0 +1,12 @@
+{
+  "name": "qbs-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "api": "node api-workflow.mjs",
+    "ui": "node ui-walkthrough.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.56.1"
+  }
+}

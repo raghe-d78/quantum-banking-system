@@ -70,14 +70,24 @@ def insert_score(*, transaction_id, account_id, classical_score, quantum_score, 
 
 
 def insert_alert(*, transaction_id, account_id, risk_level, decision_score, payload) -> bool:
+    """
+    Opens an alert unless the transaction was already reversed. The
+    cancellation registry lives in ledger_db on the same CockroachDB cluster,
+    so a cross-database read keeps replays / out-of-order topic consumption
+    from resurrecting an alert for a cancelled transaction.
+    """
     rows = _exec(
         """
-        INSERT INTO fraud_alerts (transaction_id, account_id, risk_level, decision_score, status, payload)
-        VALUES (%s,%s,%s,%s,'OPEN',%s)
+        INSERT INTO fraud_alerts (transaction_id, account_id, risk_level, decision_score, status, payload, resolved_at, resolved_by)
+        SELECT %s, %s, %s, %s,
+               CASE WHEN c.original_transaction_id IS NULL THEN 'OPEN' ELSE 'CANCELLED' END,
+               %s, c.cancelled_at, c.cancelled_by
+          FROM (SELECT 1) AS one
+          LEFT JOIN ledger_db.public.cancelled_transactions c ON c.original_transaction_id = %s
         ON CONFLICT (transaction_id, account_id) DO NOTHING
         RETURNING transaction_id
         """,
-        (transaction_id, account_id, risk_level, decision_score, json.dumps(payload)),
+        (transaction_id, account_id, risk_level, decision_score, json.dumps(payload), transaction_id),
     )
     return bool(rows)
 
