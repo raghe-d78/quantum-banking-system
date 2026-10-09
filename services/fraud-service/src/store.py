@@ -1,9 +1,9 @@
 """
 Storage adapters: CockroachDB (psycopg2) + Redis.
 
-CockroachDB is used for durable persistence of fraud_scores + fraud_alerts.
-Redis is used for transient sliding-window features. Both clients are lazy
-so unit tests don't need real backends.
+fraud_scores / fraud_alerts are keyed on (transaction_id, account_id) so BOTH
+legs of a transfer are scored and recorded; ON CONFLICT DO NOTHING keeps the
+consumer idempotent across Kafka redeliveries.
 """
 from __future__ import annotations
 import os
@@ -12,7 +12,7 @@ import logging
 
 log = logging.getLogger("fraud.store")
 
-# ------------------------------- Postgres ------------------------------------
+# ------------------------------- CockroachDB ----------------------------------
 
 _pool = None
 
@@ -21,69 +21,60 @@ def _get_pool():
     global _pool
     if _pool is not None:
         return _pool
-    import psycopg2
     from psycopg2 import pool
-    host = os.environ.get("DB_HOST", "cockroachdb")
-    port = int(os.environ.get("DB_PORT", "26257"))
-    user = os.environ.get("DB_USER", "root")
-    db   = os.environ.get("DB_NAME", "fraud_db")
     _pool = pool.ThreadedConnectionPool(
-        minconn=1, maxconn=8, host=host, port=port, user=user, dbname=db, sslmode="disable"
+        minconn=1, maxconn=int(os.environ.get("DB_POOL_MAX", "8")),
+        host=os.environ.get("DB_HOST", "cockroachdb"),
+        port=int(os.environ.get("DB_PORT", "26257")),
+        user=os.environ.get("DB_USER", "root"),
+        password=os.environ.get("DB_PASSWORD") or None,
+        dbname=os.environ.get("DB_NAME", "fraud_db"),
+        sslmode=os.environ.get("DB_SSL", "disable"),
+        application_name="fraud-service",
     )
     return _pool
 
 
 def _exec(sql: str, params: tuple = ()):
+    import psycopg2
     p = _get_pool()
     conn = p.getconn()
+    broken = False
     try:
         with conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
-                if cur.description:
-                    return cur.fetchall()
-                return None
+                return cur.fetchall() if cur.description else None
+    except psycopg2.OperationalError:
+        broken = True
+        raise
     finally:
-        p.putconn(conn)
+        p.putconn(conn, close=broken)
 
 
-def insert_score(*, transaction_id: str, account_id: str, classical_score: float,
-                 quantum_score: float, decision_score: float, risk_level: str,
-                 classical_model: str, quantum_model: str, scored_at: str,
-                 features_json: dict | None = None) -> bool:
-    """
-    Idempotent on transaction_id. Returns True when a new row was inserted,
-    False when an existing row was kept (effectively-exactly-once scoring).
-    """
+def insert_score(*, transaction_id, account_id, classical_score, quantum_score, decision_score,
+                 risk_level, classical_model, quantum_model, scored_at, features_json=None) -> bool:
     rows = _exec(
         """
         INSERT INTO fraud_scores (
-          transaction_id, account_id, classical_score, quantum_score,
-          decision_score, risk_level, classical_model, quantum_model,
-          scored_at, features
-        )
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT (transaction_id) DO NOTHING
+          transaction_id, account_id, classical_score, quantum_score, decision_score,
+          risk_level, classical_model, quantum_model, scored_at, features
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON CONFLICT (transaction_id, account_id) DO NOTHING
         RETURNING transaction_id
         """,
-        (
-            transaction_id, account_id, classical_score, quantum_score,
-            decision_score, risk_level, classical_model, quantum_model,
-            scored_at, json.dumps(features_json or {}),
-        ),
+        (transaction_id, account_id, classical_score, quantum_score, decision_score,
+         risk_level, classical_model, quantum_model, scored_at, json.dumps(features_json or {})),
     )
     return bool(rows)
 
 
-def insert_alert(*, transaction_id: str, account_id: str, risk_level: str,
-                 decision_score: float, payload: dict) -> bool:
+def insert_alert(*, transaction_id, account_id, risk_level, decision_score, payload) -> bool:
     rows = _exec(
         """
-        INSERT INTO fraud_alerts (
-          transaction_id, account_id, risk_level, decision_score, status, payload
-        )
+        INSERT INTO fraud_alerts (transaction_id, account_id, risk_level, decision_score, status, payload)
         VALUES (%s,%s,%s,%s,'OPEN',%s)
-        ON CONFLICT (transaction_id) DO NOTHING
+        ON CONFLICT (transaction_id, account_id) DO NOTHING
         RETURNING transaction_id
         """,
         (transaction_id, account_id, risk_level, decision_score, json.dumps(payload)),
@@ -91,27 +82,44 @@ def insert_alert(*, transaction_id: str, account_id: str, risk_level: str,
     return bool(rows)
 
 
-def list_alerts(limit: int = 50):
-    rows = _exec(
-        """
+def resolve_alerts(*, transaction_id: str, status: str, resolved_by: str | None,
+                   account_id: str | None = None) -> int:
+    """Close every OPEN alert of a transaction (both legs). Returns rows updated."""
+    assert status in ("CANCELLED", "DISMISSED")
+    sql = """
+        UPDATE fraud_alerts
+           SET status = %s, resolved_at = now(), resolved_by = %s
+         WHERE transaction_id = %s AND status = 'OPEN'
+    """
+    params = [status, resolved_by, transaction_id]
+    if account_id:
+        sql += " AND account_id = %s"
+        params.append(account_id)
+    rows = _exec(sql + " RETURNING transaction_id", tuple(params))
+    return len(rows or [])
+
+
+def list_alerts(limit: int = 50, status: str | None = None, risk: str | None = None):
+    sql = """
         SELECT transaction_id, account_id, risk_level, decision_score, status,
                created_at, resolved_at, resolved_by
-          FROM fraud_alerts
-         ORDER BY created_at DESC
-         LIMIT %s
-        """,
-        (int(limit),),
-    ) or []
+          FROM fraud_alerts WHERE 1=1
+    """
+    params: list = []
+    if status in ("OPEN", "CANCELLED", "DISMISSED"):
+        sql += " AND status = %s"; params.append(status)
+    if risk in ("High", "Critical"):
+        sql += " AND risk_level = %s"; params.append(risk)
+    sql += " ORDER BY created_at DESC LIMIT %s"
+    params.append(int(limit))
+    rows = _exec(sql, tuple(params)) or []
     return [
         {
-            "transactionId":  str(r[0]),
-            "accountId":      str(r[1]),
-            "riskLevel":      r[2],
-            "decisionScore":  float(r[3]),
-            "status":         r[4],
-            "createdAt":      r[5].isoformat() if r[5] else None,
-            "resolvedAt":     r[6].isoformat() if r[6] else None,
-            "resolvedBy":     str(r[7]) if r[7] else None,
+            "transactionId": str(r[0]), "accountId": str(r[1]), "riskLevel": r[2],
+            "decisionScore": float(r[3]), "status": r[4],
+            "createdAt": r[5].isoformat() if r[5] else None,
+            "resolvedAt": r[6].isoformat() if r[6] else None,
+            "resolvedBy": str(r[7]) if r[7] else None,
         }
         for r in rows
     ]
@@ -120,19 +128,21 @@ def list_alerts(limit: int = 50):
 def stats():
     rows = _exec(
         """
-        SELECT COUNT(*)::INT8                                   AS total_scored,
-               COUNT(*) FILTER (WHERE risk_level='Low')::INT8       AS low,
-               COUNT(*) FILTER (WHERE risk_level='Medium')::INT8    AS medium,
-               COUNT(*) FILTER (WHERE risk_level='High')::INT8      AS high,
-               COUNT(*) FILTER (WHERE risk_level='Critical')::INT8  AS critical,
-               (SELECT COUNT(*) FROM fraud_alerts WHERE status='OPEN')::INT8 AS open_alerts
+        SELECT COUNT(*)::INT8,
+               COUNT(*) FILTER (WHERE risk_level='Low')::INT8,
+               COUNT(*) FILTER (WHERE risk_level='Medium')::INT8,
+               COUNT(*) FILTER (WHERE risk_level='High')::INT8,
+               COUNT(*) FILTER (WHERE risk_level='Critical')::INT8,
+               (SELECT COUNT(*) FROM fraud_alerts WHERE status='OPEN')::INT8,
+               (SELECT COUNT(*) FROM fraud_alerts WHERE status='CANCELLED')::INT8,
+               (SELECT COUNT(*) FROM fraud_alerts WHERE status='DISMISSED')::INT8
           FROM fraud_scores
         """
-    ) or [(0, 0, 0, 0, 0, 0)]
+    ) or [(0,) * 8]
     r = rows[0]
     return {
-        "totalScored": int(r[0]), "low": int(r[1]), "medium": int(r[2]),
-        "high": int(r[3]), "critical": int(r[4]), "openAlerts": int(r[5]),
+        "totalScored": int(r[0]), "low": int(r[1]), "medium": int(r[2]), "high": int(r[3]),
+        "critical": int(r[4]), "openAlerts": int(r[5]), "cancelledAlerts": int(r[6]), "dismissedAlerts": int(r[7]),
     }
 
 
@@ -156,8 +166,7 @@ def get_redis():
         return _redis
     try:
         import redis as redis_mod
-        url = os.environ.get("REDIS_URL", "redis://redis:6379")
-        _redis = redis_mod.from_url(url, socket_timeout=2)
+        _redis = redis_mod.from_url(os.environ.get("REDIS_URL", "redis://redis:6379"), socket_timeout=2)
         _redis.ping()
     except Exception as e:
         log.warning("redis unavailable, sliding-window features disabled: %s", e)

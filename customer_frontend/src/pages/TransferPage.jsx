@@ -89,7 +89,7 @@ const TransferPage = () => {
     reference: "",            // ← Backend expects this (not note)
   });
   const [steps, setSteps] = useState(initSteps());
-  const [flowVisible, setFlowVisible] = useState(false);
+  const [, setFlowVisible] = useState(false);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
@@ -140,8 +140,8 @@ const handleVerify = async () => {
     }));
     setVerified(true);
     
-  } catch (err) {
-    // ✅ Fallback: Just validate UUID format for customers
+  } catch {
+    // Fallback: just validate UUID format for customers
     const isValidFormat = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(destId);
     
     if (isValidFormat) {

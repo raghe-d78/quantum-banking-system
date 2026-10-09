@@ -1,5 +1,4 @@
 import { useState, useEffect, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
 import api from "../lib/api";
 
 const tk = {
@@ -42,7 +41,6 @@ const formatDate = (dateStr) => {
 };
 
 const UsersPage = () => {
-  const navigate = useNavigate();
   const [allUsers,   setAllUsers]   = useState([]);
   const [loading,    setLoading]    = useState(true);
   const [error,      setError]      = useState(null);

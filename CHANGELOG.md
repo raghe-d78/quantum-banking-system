@@ -3,6 +3,95 @@
 All notable changes to the Quantum Banking System are documented in this file.
 Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased] — Phase 6: Industrial hardening
+
+### Fixed (security)
+- **Transfer ownership.** `POST /transfer` now rejects a `sourceAccountId`
+  that does not belong to the caller (`403 FORBIDDEN`); staff may still move
+  money between arbitrary accounts.
+- **Edge authentication.** The gateway verifies the JWT and applies role
+  gates before proxying. `/fraud/*`, `/kms/*`, `/ledger/*`, `/audit/*` and
+  `/admin/*` are staff-only; `/quantum/*` requires any authenticated role.
+  fraud-service (PyJWT), kms-service, ledger-service and audit-service
+  verify again themselves.
+- **Withdraw race.** Withdraw now locks the account row (`FOR UPDATE` by
+  user id) instead of a plain SELECT.
+- **Statement export XSS / CSV injection.** HTML is escaped, formula-leading
+  cells are neutralised, response carries a restrictive CSP.
+- **Suspended users** can no longer log in or refresh; refresh revokes the
+  chain.
+- **Rate limiter spoofing.** `trust proxy` is only enabled with
+  `TRUST_PROXY=true` (set by the prod overlay).
+- Unknown JWT roles are rejected (401) rather than silently treated as users.
+
+### Fixed (correctness)
+- **Atomic money path.** Deposit, withdraw, transfer and cancel run in ONE
+  CockroachDB transaction spanning `account_db` and `ledger_db` via
+  fully-qualified table names (`shared/db.withTransaction`), with automatic
+  retry on serialization failures (40001). The old two-connection,
+  two-COMMIT window is gone.
+- **Transfers were half-audited and half-scored.** `audit_logs`,
+  `fraud_scores` and `fraud_alerts` now use composite keys
+  (`transaction_id, account_id[, event_type]`) so both legs are recorded.
+- **Daily cap** counts only outgoing `TRANSFER` debits (new `tx_type`
+  column), not withdrawals or compensations.
+- **Cancellation closes the fraud alert.** fraud-service consumes
+  `transaction.cancelled` and marks alerts `CANCELLED`; audit-service
+  records one `TRANSACTION_CANCELLED` row per compensation.
+- A reversal that would overdraw fails with `409 REVERSAL_INSUFFICIENT_FUNDS`
+  instead of a 500.
+- Money precision aligned to `DECIMAL(19,4)` everywhere (balances were 3 dp).
+- Gateway now proxies `/accounts/verify/:id`, `PUT /auth/password`,
+  `/transactions/export`, forwards query strings on `/transactions`, and
+  drops the dead `POST /transactions`.
+- staff_frontend failed to build on Linux (`Loginpage.jsx` vs
+  `./pages/LoginPage` import). Renamed; both SPAs lint and build clean.
+- Customer transaction detail page now reads the real API instead of mock
+  data and sits behind the protected route.
+
+### Added
+- `shared/db` env-driven pool + `withTransaction`; `shared/auth` RBAC
+  middleware; `shared/errors` typed `AppError` with stable codes and an
+  Express handler; `shared/logger` JSON logger.
+- ledger-service is a real read-side: entries, transaction legs with
+  double-entry check, and `GET /ledger/accounts/:id/reconcile` (ledger vs
+  cached balance drift).
+- Outbox relay claims with `FOR UPDATE SKIP LOCKED` (multi-replica safe),
+  idempotent Kafka producer (`acks=all`), adaptive drain, `GET /admin/outbox/stats`.
+- `GET /admin/accounts/:id/transactions`, `GET /ready` everywhere,
+  `GET /ready` on the gateway fans out to all upstreams.
+- `POST /fraud/alerts/:id/dismiss`, alert filters by status / risk,
+  dismissed / cancelled KPIs and a Dismiss action in the staff dashboard.
+- Account `status` (ACTIVE / FROZEN / CLOSED) enforced on every mutation.
+- Compose: healthchecks on every service, `restart: unless-stopped`, log
+  rotation, named volumes for CockroachDB, Kafka and fraud models,
+  explicit topic creation (auto-create off), pinned CockroachDB image.
+  Prod overlay removes all internal host ports and sets resource limits.
+  Dev overlay uses `node --watch`.
+- Dockerfiles: `node:20-slim`, `npm ci --omit=dev`, non-root user; fraud
+  image runs as `appuser`, models on a volume.
+- `scripts/migrations/001_phase6_industrial.sql` + `make db-migrate`,
+  `make test`, `make prod`.
+- CI: matrix over shared + 4 Node services, pytest, frontend lint + build,
+  compose validation for both overlays, image build.
+- OpenAPI 2.0.0 covering all 39 routes and the error-code catalogue.
+- Tests: 180 total (was 94). New coverage for ownership, auth gates, 40001
+  retry, single-COMMIT ordering, reversal edge cases, export escaping,
+  reconciliation, gateway header forwarding and raw passthrough.
+
+### Removed
+- Dead gateway files (`routes/auth.routes.js` pointing at port 8000, empty
+  middleware), `account.repository.js` shim, `test-import.js`,
+  identity `reco.js` password-reset script, bogus `test` npm dependency,
+  unused `uuid` dependency, `transaction_db` database.
+
+### Changed
+- Access tokens default to 15 minutes (`JWT_EXPIRES`), bcrypt cost 12.
+- Error bodies are `{ ok:false, code, message }` across services; the
+  frontends read `message` first.
+- README rewritten to match the stack that actually runs (CockroachDB,
+  Apache Kafka KRaft, seed admin `adminn`).
+
 ## [Unreleased] — Phase 5: NFR Hardening
 
 ### Added (Documentation — Usage guide & code-graph visualization)

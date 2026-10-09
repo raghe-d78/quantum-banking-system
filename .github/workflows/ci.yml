@@ -1,4 +1,4 @@
-name: CI Pipeline
+name: CI
 
 on:
   push:
@@ -6,47 +6,80 @@ on:
   pull_request:
     branches: [ main ]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-
-  test:
+  node:
+    name: node / ${{ matrix.package }}
     runs-on: ubuntu-latest
-
     strategy:
+      fail-fast: false
       matrix:
-        service:
-          - identity-service
-          - account-service
-
+        package:
+          - shared
+          - services/account-service
+          - services/identity-service
+          - services/ledger-service
+          - services/api-gateway
     steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            shared/package-lock.json
+            ${{ matrix.package }}/package-lock.json
+      - name: Install shared deps
+        run: cd shared && npm ci --no-audit --no-fund
+      - name: Install
+        run: cd ${{ matrix.package }} && npm ci --no-audit --no-fund
+      - name: Test
+        run: cd ${{ matrix.package }} && npm test
+      - name: Audit (high+)
+        run: cd ${{ matrix.package }} && npm audit --omit=dev --audit-level=high || true
 
-      - name: Install dependencies
-        run: |
-          cd services/${{ matrix.service }}
-          npm install
-
-      - name: Run Tests
-        run: |
-          cd services/${{ matrix.service }}
-          npm test
-
-  docker-build:
-
+  python:
+    name: python / fraud-service
     runs-on: ubuntu-latest
-    needs: test
-
     steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install (unit-test subset)
+        run: pip install pytest numpy flask PyJWT
+      - name: Test
+        run: cd services/fraud-service && python -m pytest tests -q
 
-      - name: Checkout
-        uses: actions/checkout@v4
+  frontends:
+    name: frontends / lint + build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [customer_frontend, staff_frontend]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: cd ${{ matrix.app }} && npm ci --no-audit --no-fund
+      - run: cd ${{ matrix.app }} && npm run lint
+      - run: cd ${{ matrix.app }} && npm run build
 
-      - name: Build Docker Images
+  docker:
+    name: docker / compose build
+    runs-on: ubuntu-latest
+    needs: [node, python]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Validate compose files
         run: |
-          docker compose -f infrastructure/docker-compose.yml build
+          docker compose -f infrastructure/docker-compose.yml config -q
+          docker compose -f infrastructure/docker-compose.yml -f infrastructure/docker-compose.prod.yml config -q
+      - name: Build images
+        run: docker compose -f infrastructure/docker-compose.yml build

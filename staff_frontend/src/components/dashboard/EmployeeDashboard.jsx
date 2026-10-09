@@ -9,6 +9,16 @@ const tk = {
   cream: "#f5f3ef", creamBorder: "#e8e2d8", muted: "#aaa",
 };
 
+// Hoisted out of the dashboard component so React does not remount it on every render.
+const Placeholder = ({ icon, label }) => (
+  <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"55vh", flexDirection:"column", gap:16 }}>
+    <div style={{ fontSize:52, color:tk.creamBorder }}>{icon}</div>
+    <div style={{ color:tk.muted, fontSize:14, letterSpacing:1 }}>{label} — Coming Soon</div>
+  </div>
+);
+
+
+
 const EmployeeDashboard = () => {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -30,13 +40,6 @@ const EmployeeDashboard = () => {
   ];
 
   const groups = [...new Set(menuItems.map(i => i.group))];
-
-  const Placeholder = ({ icon, label }) => (
-    <div style={{ display:"flex", alignItems:"center", justifyContent:"center", height:"55vh", flexDirection:"column", gap:16 }}>
-      <div style={{ fontSize:52, color:tk.creamBorder }}>{icon}</div>
-      <div style={{ color:tk.muted, fontSize:14, letterSpacing:1 }}>{label} — Coming Soon</div>
-    </div>
-  );
 
   return (
     <div style={{ display:"flex", minHeight:"100vh", fontFamily:"'Georgia', serif", background:tk.cream }}>

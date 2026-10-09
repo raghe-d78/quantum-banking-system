@@ -6,7 +6,7 @@ $u=irm "$base/admin/users" -Method Post -ContentType "application/json" -Headers
 $uid=$u.user.id
 "uid=$uid"
 $body='{"userId":"'+$uid+'","currency":"TND"}'
-$created = docker exec infrastructure-api-gateway-1 wget -qO- --post-data=$body --header="Content-Type: application/json" --header="Authorization: Bearer $adm" http://account-service:3000/accounts/create 2>&1
+$created = docker exec qbs-api-gateway-1 wget -qO- --post-data=$body --header="Content-Type: application/json" --header="Authorization: Bearer $adm" http://account-service:3000/accounts/create 2>&1
 "created: $created"
 $accId=($created | ConvertFrom-Json).account.id
 "accId=$accId"
@@ -27,4 +27,4 @@ docker exec cockroachdb /cockroach/cockroach sql --insecure --database=audit_db 
 "--- /audit/stats ---"
 irm "http://localhost:3004/audit/stats" | ConvertTo-Json -Compress
 "--- account-service relay tail ---"
-docker logs infrastructure-account-service-1 --tail 50 2>&1 | Select-Object -Last 25
+docker logs qbs-account-service-1 --tail 50 2>&1 | Select-Object -Last 25

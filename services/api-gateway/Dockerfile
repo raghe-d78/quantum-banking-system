@@ -1,11 +1,14 @@
-FROM node:20
-
+FROM node:20-slim
+ENV NODE_ENV=production
 WORKDIR /app
 
-COPY package*.json ./
+COPY services/api-gateway/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
-RUN npm install
+COPY shared /shared
+RUN cd /shared && npm ci --omit=dev --no-audit --no-fund
 
-COPY . .
-
-CMD ["npm", "start"]
+COPY services/api-gateway/src ./src
+USER node
+EXPOSE 3000
+CMD ["node", "src/server.js"]

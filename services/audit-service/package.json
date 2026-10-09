@@ -1,12 +1,11 @@
 {
   "name": "audit-service",
-  "version": "1.0.0",
-  "scripts": {
-    "start": "node src/server.js"
-  },
+  "version": "2.0.0",
+  "private": true,
+  "scripts": { "start": "node src/server.js", "dev": "node --watch src/server.js" },
   "dependencies": {
     "express": "^4.19.0",
     "kafkajs": "^2.2.4",
-    "pg": "^8.11.0"
+    "pg": "^8.20.0"
   }
 }

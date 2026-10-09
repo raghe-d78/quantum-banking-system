@@ -1,14 +1,14 @@
-FROM node:20
-
+FROM node:20-slim
+ENV NODE_ENV=production
 WORKDIR /app
 
 COPY services/ledger-service/package*.json ./
-RUN npm install
+RUN npm ci --omit=dev --no-audit --no-fund
 
-COPY services/ledger-service ./services/ledger-service
-COPY shared ./shared
-RUN cd shared && npm install --omit=dev
+COPY shared /shared
+RUN cd /shared && npm ci --omit=dev --no-audit --no-fund
 
-WORKDIR /app/services/ledger-service
-
-CMD ["node","src/server.js"]
+COPY services/ledger-service/src ./src
+USER node
+EXPOSE 3003
+CMD ["node", "src/server.js"]

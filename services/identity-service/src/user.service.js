@@ -33,6 +33,11 @@ exports.updateUser = async (id, fields) => {
     if (conflict) throw new Error("Email already in use");
   }
 
+  if (fields.role && !["admin", "employee", "customer"].includes(fields.role))
+    throw new Error("Invalid role");
+  if (fields.status && !["active", "suspended"].includes(fields.status))
+    throw new Error("Invalid status");
+
   const updated = await userRepo.update(id, fields);
   return safeUser(updated);
 };
@@ -78,7 +83,7 @@ exports.updatePassword = async (userId, { currentPassword, newPassword }) => {
   const valid    = await bcrypt.compare(currentPassword, fullUser.password_hash);
   if (!valid) throw new Error("Current password is incorrect");
 
-  const newHash = await bcrypt.hash(newPassword, 10);
+  const newHash = await bcrypt.hash(newPassword, Number(process.env.BCRYPT_ROUNDS || 12));
   await userRepo.updatePassword(userId, newHash);
   return { updated: true };
 };

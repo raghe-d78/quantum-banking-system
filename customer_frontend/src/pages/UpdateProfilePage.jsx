@@ -31,7 +31,7 @@ const Section = ({ title, children }) => (
 );
 
 const UpdateProfilePage = () => {
-  const { user, logout } = useAuth();
+  const { user } = useAuth();
 
   const [profile, setProfile] = useState({ name: "", email: "", phone: "", address: "" });
   const [password, setPassword] = useState({ current: "", newPass: "", confirm: "" });

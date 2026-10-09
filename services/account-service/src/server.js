@@ -3,40 +3,34 @@ require("dotenv").config()
 const app   = require("./app")
 const kafka = require("./kafka")
 const cache = require("/shared/cache")
+const log   = require("/shared/logger")("account-service")
 
 const PORT = process.env.PORT || 3002
 
-console.log("Starting account service...")
-
 ;(async () => {
-  // Phase 2.1 — connect Redis (best-effort; cache helpers no-op if down).
-  try { await cache.connect() }
-  catch (e) { console.error("⚠️  Redis connect failed at boot:", e.message) }
+  try { await cache.connect() } catch (e) { log.warn("redis connect failed at boot (cache disabled)", { err: e.message }) }
 
-  // Best-effort Kafka connect — service must boot even if Kafka is briefly down.
-  try {
-    await kafka.connect()
-    kafka.startRelay()
-  } catch (e) {
-    console.error("⚠️  Kafka connect failed at boot, relay will retry:", e.message)
-    // Retry connection in background; relay only runs after success.
-    const retry = async () => {
-      try { await kafka.connect(); kafka.startRelay() }
-      catch { setTimeout(retry, 5000) }
-    }
-    setTimeout(retry, 5000)
+  const startKafka = async () => {
+    try { await kafka.connect(); kafka.startRelay() }
+    catch (e) { log.warn("kafka connect failed, retrying in 5s", { err: e.message }); setTimeout(startKafka, 5000) }
   }
+  startKafka()
 })()
 
-const server = app.listen(PORT, () => {
-  console.log(`Account service running on port ${PORT}`)
-})
+const server = app.listen(PORT, () => log.info("account-service listening", { port: Number(PORT) }))
+server.keepAliveTimeout = 65_000
 
-const shutdown = async () => {
-  console.log("Shutting down…")
-  await kafka.disconnect().catch(() => {})
-  await cache.disconnect().catch(() => {})
-  server.close(() => process.exit(0))
+let shuttingDown = false
+const shutdown = async (signal) => {
+  if (shuttingDown) return
+  shuttingDown = true
+  log.info("shutting down", { signal })
+  server.close(async () => {
+    await kafka.disconnect().catch(() => {})
+    await cache.disconnect().catch(() => {})
+    process.exit(0)
+  })
+  setTimeout(() => process.exit(1), 10_000).unref()
 }
-process.on("SIGTERM", shutdown)
-process.on("SIGINT",  shutdown)
+process.on("SIGTERM", () => shutdown("SIGTERM"))
+process.on("SIGINT",  () => shutdown("SIGINT"))

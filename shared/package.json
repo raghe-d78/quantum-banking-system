@@ -1,13 +1,14 @@
 {
   "name": "shared",
-  "version": "1.0.0",
-  "description": "Shared utilities for Quantum Banking System",
+  "version": "2.0.0",
+  "description": "Shared utilities for Quantum Banking System (money, db, cache, auth, logger)",
   "main": "index.js",
   "scripts": {
     "test": "jest tests/"
   },
   "dependencies": {
     "decimal.js": "^10.6.0",
+    "jsonwebtoken": "^9.0.3",
     "pg": "^8.20.0",
     "redis": "^4.7.0"
   },

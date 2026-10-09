@@ -1,23 +1,8 @@
 # ──────────────────────────────────────────────────────────────────
-# Phase 5.2 — Production HTTPS overlay
-#
-# Adds a Caddy reverse proxy in front of api-gateway. Caddy handles
-# TLS termination automatically (Let's Encrypt for real domains, or
-# its built-in CA for `localhost`/`*.local`).
-#
-# Usage:
-#   cd infrastructure
+# Production overlay — Caddy TLS edge, no internal ports on the host,
+# resource limits, gateway trusts the proxy hop.
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-#
-# Required env vars (set in `infrastructure/.env`):
-#   CADDY_DOMAIN  — public hostname (or `localhost` for local TLS)
-#   CADDY_EMAIL   — contact email for Let's Encrypt notifications
-#
-# Notes:
-# - The api-gateway port (3000) is NOT exposed to the host in this
-#   overlay; only Caddy's 443/80 are reachable from outside Docker.
-# - For local dev WITHOUT TLS, just keep using `docker-compose.yml`
-#   alone — this overlay does not run.
+# Required in .env: JWT_SECRET, JWT_REFRESH_SECRET, CADDY_DOMAIN, CADDY_EMAIL
 # ──────────────────────────────────────────────────────────────────
 services:
   caddy:
@@ -29,18 +14,52 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      - CADDY_DOMAIN=${CADDY_DOMAIN:-localhost}
-      - CADDY_EMAIL=${CADDY_EMAIL:-admin@example.com}
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+      CADDY_EMAIL: ${CADDY_EMAIL:-admin@example.com}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - api-gateway
+      api-gateway: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/caddy-health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
-  # Stop publishing the gateway directly when running with the prod
-  # overlay — all traffic must traverse Caddy for TLS termination.
+  # Only Caddy is reachable from outside the Docker network.
   api-gateway:
+    ports: !reset []
+    environment:
+      TRUST_PROXY: "true"
+    deploy: { resources: { limits: { cpus: "1.0", memory: 512M } } }
+  identity-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "1.0", memory: 512M } } }
+  account-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "2.0", memory: 768M } } }
+  ledger-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "0.5", memory: 256M } } }
+  audit-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "0.5", memory: 384M } } }
+  quantum-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "2.0", memory: 2G } } }
+  kms-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "0.5", memory: 256M } } }
+  fraud-service:
+    ports: !reset []
+    deploy: { resources: { limits: { cpus: "2.0", memory: 3G } } }
+  cockroachdb:
+    ports: !reset []
+  redis:
+    ports: !reset []
+  kafka:
     ports: !reset []
 
 volumes:

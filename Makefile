@@ -36,13 +36,27 @@ db-shell:
 db-init:
 	docker exec -i cockroachdb ./cockroach sql --insecure < scripts/init-db.sql
 
+# Upgrade an existing cluster to the Phase 6 schema (idempotent).
+db-migrate:
+	for f in scripts/migrations/*.sql; do echo "applying $$f"; docker exec -i cockroachdb ./cockroach sql --insecure < $$f; done
+
+# Run every unit suite on the host (needs node + python deps installed).
+test:
+	cd shared && npm test
+	cd services/account-service && npm test
+	cd services/identity-service && npm test
+	cd services/ledger-service && npm test
+	cd services/api-gateway && npm test
+	cd services/fraud-service && python -m pytest tests -q
+
+prod:
+	docker compose -f $(COMPOSE_FILE) -f infrastructure/docker-compose.prod.yml up -d --build
+
 gateway:
 	docker compose -f $(COMPOSE_FILE) up api-gateway
 
 identity:
 	docker compose -f $(COMPOSE_FILE) up identity-service
-test-identity:
-	docker compose exec identity npm test
 
 account:
 	docker compose -f $(COMPOSE_FILE) up account-service

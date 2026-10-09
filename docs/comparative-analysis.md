@@ -100,10 +100,10 @@ cd infrastructure
 docker compose up -d
 
 # 2. Wait for fraud-service to train (look for "VQC ready" in logs)
-docker logs infrastructure-fraud-service-1 --tail 30
+docker logs qbs-fraud-service-1 --tail 30
 
 # 3. Run the comparison
-docker exec -w /app infrastructure-fraud-service-1 \
+docker exec -w /app qbs-fraud-service-1 \
     python -m src.eval_compare
 ```
 

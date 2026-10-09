@@ -1,35 +1,27 @@
-version: "3.9"
-
+# Dev overlay: hot reload for the Node services (node --watch), source mounted.
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 services:
   identity-service:
-    command: npm run dev
-    volumes:
-      - ../services/identity-service:/app
-      - /app/node_modules
-    environment:
-      - CHOKIDAR_USEPOLLING=true
-
+    command: ["node", "--watch", "src/server.js"]
+    environment: { NODE_ENV: development, LOG_LEVEL: debug }
+    volumes: ["../services/identity-service/src:/app/src:ro", "../shared:/shared:ro"]
   account-service:
-    command: npm run dev
-    volumes:
-      - ../services/account-service:/app
-      - ../shared:/shared
-      - /app/node_modules
-    environment:
-      - CHOKIDAR_USEPOLLING=true
-
+    command: ["node", "--watch", "src/server.js"]
+    environment: { NODE_ENV: development, LOG_LEVEL: debug }
+    volumes: ["../services/account-service/src:/app/src:ro", "../shared:/shared:ro"]
   ledger-service:
-    command: npm run dev
-    volumes:
-      - ../services/ledger-service:/app
-      - /app/node_modules
-    environment:
-      - CHOKIDAR_USEPOLLING=true
-
+    command: ["node", "--watch", "src/server.js"]
+    environment: { NODE_ENV: development, LOG_LEVEL: debug }
+    volumes: ["../services/ledger-service/src:/app/src:ro", "../shared:/shared:ro"]
+  audit-service:
+    command: ["node", "--watch", "src/server.js"]
+    environment: { NODE_ENV: development, LOG_LEVEL: debug }
+    volumes: ["../services/audit-service/src:/app/src:ro", "../shared:/shared:ro"]
+  kms-service:
+    command: ["node", "--watch", "src/server.js"]
+    environment: { NODE_ENV: development, LOG_LEVEL: debug }
+    volumes: ["../services/kms-service/src:/app/src:ro", "../shared:/shared:ro"]
   api-gateway:
-    command: npm run dev
-    volumes:
-      - ../services/api-gateway:/app
-      - /app/node_modules
-    environment:
-      - CHOKIDAR_USEPOLLING=true
+    command: ["node", "--watch", "src/server.js"]
+    environment: { NODE_ENV: development, LOG_LEVEL: debug }
+    volumes: ["../services/api-gateway/src:/app/src:ro", "../shared:/shared:ro"]

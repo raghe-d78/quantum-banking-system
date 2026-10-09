@@ -29,7 +29,7 @@ describe("POST /auth/login", () => {
     const hash = await bcrypt.hash("password123", 10)
     userRepo.findByUsername.mockResolvedValue({
       id: "uuid-1", username: "mohamed", email: "m@banque.tn",
-      name: "Mohamed Ben Ali", role: "user", password_hash: hash,
+      name: "Mohamed Ben Ali", role: "customer", password_hash: hash,
     })
 
     const res = await request(app)
@@ -42,7 +42,7 @@ describe("POST /auth/login", () => {
     expect(res.body.user).toMatchObject({
       username: "mohamed",
       name:     "Mohamed Ben Ali",
-      role:     "user",
+      role:     "customer",
     })
     expect(res.body.user).not.toHaveProperty("password_hash")
   })
@@ -51,7 +51,7 @@ describe("POST /auth/login", () => {
     const hash = await bcrypt.hash("correctpassword", 10)
     userRepo.findByUsername.mockResolvedValue({
       id: "uuid-1", username: "mohamed", email: "m@banque.tn",
-      name: "Mohamed Ben Ali", role: "user", password_hash: hash,
+      name: "Mohamed Ben Ali", role: "customer", password_hash: hash,
     })
 
     const res = await request(app)
@@ -89,16 +89,16 @@ describe("POST /admin/users", () => {
   test("admin can create a user", async () => {
     userRepo.create.mockResolvedValue({
       id: "new-uuid", username: "sarra", email: "sarra@banque.tn",
-      name: "Sarra Ben Ali", role: "user",
+      name: "Sarra Ben Ali", role: "customer",
     })
 
     const res = await request(app)
       .post("/admin/users")
       .set("Authorization", `Bearer ${getAdminToken()}`)
-      .send({ username: "sarra", email: "sarra@banque.tn", name: "Sarra Ben Ali", password: "pass123" })
+      .send({ username: "sarra", email: "sarra@banque.tn", name: "Sarra Ben Ali", password: "pass12345" })
 
     expect(res.statusCode).toBe(201)
-    expect(res.body.user).toMatchObject({ username: "sarra", role: "user" })
+    expect(res.body.user).toMatchObject({ username: "sarra", role: "customer" })
   })
 
   test("returns 401 without token", async () => {
@@ -112,7 +112,7 @@ describe("POST /admin/users", () => {
   test("returns 403 if not admin", async () => {
     const jwt   = require("jsonwebtoken")
     const token = jwt.sign(
-      { userId: "user-uuid", role: "user" },
+      { userId: "user-uuid", role: "customer" },
       process.env.JWT_SECRET || "supersecret_change_in_prod"
     )
 

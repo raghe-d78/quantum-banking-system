@@ -98,7 +98,7 @@ const exportPDF = (transactions) => {
   const rows = transactions.map((tx) => {
     const type     = normalizeType(tx.type);
     const isCredit = type === "credit";
-    return `
+      return `
       <tr>
         <td>${fmtDate(tx.created_at)}</td>
         <td>${tx.reference ?? "—"}</td>
@@ -148,7 +148,6 @@ const exportPDF = (transactions) => {
 const TransactionModal = ({ tx, onClose }) => {
   const type     = normalizeType(tx.type);
   const cfg      = TYPE_CFG[type];
-  const isCredit = type === "credit";
 
   return (
     <div

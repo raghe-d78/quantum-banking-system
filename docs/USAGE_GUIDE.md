@@ -91,16 +91,26 @@ First boot takes ~3-5 minutes (image pulls + npm installs in containers).
 Once `docker compose ps` shows everything `running (healthy)`:
 
 ```bash
-# Gateway
-curl -s http://localhost:3000/healthz
+# Gateway liveness + readiness (fans out to every upstream)
+curl -s http://localhost:3000/health
+curl -s http://localhost:3000/ready
 
-# Direct service probes (optional)
+# Direct service probes (optional, dev only — the prod overlay hides these ports)
 curl -s http://localhost:3001/health
 curl -s http://localhost:3005/health
 curl -s http://localhost:3007/health
+```
 
-# Quantum smoke test (returns 8 random bits from the QRNG circuit)
-curl -s http://localhost:3000/quantum/qrng?n=8
+Since Phase 6 every non-auth route needs a Bearer token, so grab one
+first (the seeded admin is `adminn` / `admin123`):
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/auth/staff/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"adminn","password":"admin123"}' | jq -r .token)
+
+# Quantum smoke test (16 random bytes from the QRNG circuit)
+curl -s "http://localhost:3000/quantum/qrng?bytes=16" -H "Authorization: Bearer $TOKEN"
 ```
 
 Each call should return JSON in <500 ms (QRNG uses the AerSimulator by
@@ -126,33 +136,32 @@ npm run dev        # → http://localhost:5174   (Vite picks the next free port)
 ```
 
 Both apps are pre-configured to call the gateway at
-`http://localhost:3000`. If you change ports, edit `src/api.js` in each
-frontend.
+`http://localhost:3000`. Override with `VITE_API_URL` in a `.env.local`
+inside each frontend folder.
 
 ---
 
 ## 5. Create your first users
 
-The seed file ships **one** account out of the box:
+The schema bootstrap (`scripts/init-db.sql`) seeds **one** account:
 
-| Email             | Password   | Role  | Created by                 |
-| ----------------- | ---------- | ----- | -------------------------- |
-| `admin@banque.tn` | `admin123` | admin | `services/identity-service/src/reco.js` |
+| Username | Email              | Password   | Role  |
+| -------- | ------------------ | ---------- | ----- |
+| `adminn` | `admin@banquee.tn` | `admin123` | admin |
 
-To (re-)seed it on a fresh DB:
+> Change this password right after first login (**Profile → Password**).
+> On an existing cluster the seed is idempotent: `make db-init` re-applies it.
 
-```bash
-docker compose exec identity-service node src/reco.js
-```
+Log into the **staff** UI as `adminn / admin123` and use **Create User** to add:
 
-Then log into the **staff** UI as `admin@banque.tn / admin123` and use
-**Admin → Register Staff** to create:
+- One **employee** (e.g. `teller1`) for the staff UI
+- One **customer** (e.g. `alice`) for the customer UI
 
-- One **employee** account (e.g. `teller1@banque.tn`) for the staff UI
-- One **customer** account (e.g. `alice@example.com`) for the customer UI
-
-> Tip: the registration form auto-creates the linked CockroachDB row in
-> the `users` table _and_ in `accounts` (initial balance: 0).
+Passwords must be at least 8 characters; usernames are 3-50 chars of
+letters, digits, `.`, `_`, `-`. Creating a customer provisions the
+linked `accounts` row atomically (initial balance 0); if account-service
+is down the request fails with `502 ACCOUNT_PROVISIONING_FAILED` instead
+of leaving an account-less user behind.
 
 ---
 
@@ -162,15 +171,16 @@ URL: **`http://localhost:5173`**
 
 | Step | Page | Action | What to verify |
 |------|------|--------|----------------|
-| 1 | `/login` | Log in as `alice@example.com` | Redirects to `/dashboard` |
-| 2 | `/dashboard` | Read balance, recent activity | Card shows TND balance |
-| 3 | `/deposit` | _(staff-only — disabled here)_ | Customers can't self-deposit |
-| 4 | `/transfer` | Send TND to another account | Wizard step 1 → confirm step 2 → success step 3 |
-| 5 | `/history` | Filter by date range, click a row | Detail page shows ledger entry + audit hash |
-| 6 | `/history` | Click **Export CSV** / **Export PDF** | File downloads via `/accounts/:id/export` |
-| 7 | `/profile` | Update phone / address | Diff visible immediately |
-| 8 | `/balance` | Quick balance widget | Matches dashboard |
-| 9 | top-right menu | Logout | Refresh token revoked in Redis |
+| 1 | `/login` | Log in as `alice` (username or email) | Redirects to `/dashboard` |
+| 2 | Dashboard → Balance | Read balance (Redis read-through, 60 s TTL) | Card shows TND balance + account id |
+| 3 | Dashboard → Transfer | Paste a recipient account id, **Verify** | Name resolves via `/accounts/verify/:id` (no balance leaks) |
+| 4 | Dashboard → Transfer | Send TND | One atomic commit; a transfer from someone else's account returns `403 FORBIDDEN` |
+| 5 | Dashboard → Transfer | Exceed 10 000 TND in 24 h | `429 DAILY_LIMIT_EXCEEDED` |
+| 6 | Dashboard → Withdraw | Withdraw more than the balance | `422 INSUFFICIENT_FUNDS`, nothing written |
+| 7 | Dashboard → History | Filter, open a row, `/transaction/:id` | Detail page reads the real ledger row |
+| 8 | Dashboard → History | **Export CSV** / **Print** | Served by `/transactions/export?format=csv|pdf` |
+| 9 | Dashboard → Profile | Update phone / address, change password | `PUT /auth/me`, `PUT /auth/password` |
+| 10 | Logout | — | Refresh token revoked server-side |
 
 Behind the scenes each request flows:
 
@@ -187,16 +197,15 @@ URL: **`http://localhost:5174`**
 
 | Step | Page | Action | What to verify |
 |------|------|--------|----------------|
-| 1 | `/login` | Log in as `admin@banque.tn` | Lands on `/admin` |
-| 2 | `/admin` | Browse user list with filters | Pagination + role/status chips |
-| 3 | `/admin/users/:id` | Edit user, suspend / reactivate | Status pill updates live |
-| 4 | `/admin/register` | Create a new staff member | Returns 201 + temp password |
-| 5 | `/staff/deposit` | Deposit TND into a customer account | Balance increases, ledger row appears |
-| 6 | `/staff/withdraw` | Withdraw TND for a customer | Outbox event published |
-| 7 | `/staff/transactions` | See _all_ tenant transactions | Click row → detail + cancel button |
-| 8 | `/staff/transactions/:id` | Click **Cancel** on a posted transfer | Compensating ledger entry created |
-| 9 | `/staff/alerts` | **Phase 4 fraud alerts dashboard** | Real-time fraud scores from `fraud-service` |
-| 10 | `/staff/alerts` | Click an alert → trace to transaction | Audit hash + quantum signature shown |
+| 1 | `/login` | Log in as `adminn` | Lands on `/admin` (employees land on `/employee`) |
+| 2 | Users | Browse, search, edit, suspend / reactivate | A suspended user can no longer log in |
+| 3 | Create User | Create an employee or customer | Customer gets an account atomically |
+| 4 | Deposit | Look up by account id, username or email, deposit TND | Balance increases; `DEPOSIT` ledger row; audit row |
+| 5 | Fraud → Notifications | Open alerts feed (auto-refresh 10 s) | High / Critical verdicts from `fraud-service` |
+| 6 | Fraud → Transactions | **Cancel** an alert's transaction | Compensating rows written, alert flips to `CANCELLED` |
+| 7 | Fraud → Transactions | **Dismiss** a benign alert | Alert flips to `DISMISSED`, ledger untouched |
+| 8 | Fraud → Statistics | KPIs, consumer metrics, model metadata | Both model versions and training metrics |
+| 9 | API (curl) | `GET /ledger/accounts/:id/reconcile` | `consistent: true`, `drift: "0.0000"` |
 
 ---
 
@@ -205,23 +214,31 @@ URL: **`http://localhost:5174`**
 Manual probes, useful for demos:
 
 ```bash
+H="Authorization: Bearer $TOKEN"     # staff token from section 3
+
 # 1) QRNG — quantum random bytes (Hadamard + measurement)
-curl -s 'http://localhost:3000/quantum/qrng?n=32'
+curl -s 'http://localhost:3000/quantum/qrng?bytes=32' -H "$H"
 
-# 2) BB84 — quantum key distribution session
-curl -X POST http://localhost:3000/quantum/bb84/start \
+# 2) BB84 — key distribution, with and without an eavesdropper
+curl -s -X POST http://localhost:3000/quantum/qkd/bb84 -H "$H" \
      -H 'Content-Type: application/json' \
-     -d '{"key_length": 64}'
+     -d '{"n_qubits": 256, "rounds": 3, "with_eve": false}'
+curl -s -X POST http://localhost:3000/quantum/qkd/bb84 -H "$H" \
+     -H 'Content-Type: application/json' \
+     -d '{"n_qubits": 256, "rounds": 3, "with_eve": true}'      # → 422, QBER ≈ 25 %
 
-# 3) Sign a transaction (post-quantum Dilithium)
-curl -X POST http://localhost:3000/kms/sign \
-     -H 'Content-Type: application/json' \
-     -d '{"payload":"hello"}'
+# 3) Circuit diagram (PNG)
+curl -s 'http://localhost:3000/quantum/qkd/visualize?n_qubits=4&with_eve=true' -H "$H" -o bb84.png
 
-# 4) Fraud score for a synthetic transaction
-curl -X POST http://localhost:3000/fraud/score \
+# 4) KMS — mint a BB84-derived AES-256-GCM key, then consume it once
+KID=$(curl -s -X POST http://localhost:3000/kms/keys -H "$H" | jq -r .kid)
+curl -s http://localhost:3000/kms/keys/$KID -H "$H"           # key material
+curl -s http://localhost:3000/kms/keys/$KID -H "$H"           # → 410 Gone
+
+# 5) Fraud score for a synthetic transaction
+curl -s -X POST http://localhost:3000/fraud/score -H "$H" \
      -H 'Content-Type: application/json' \
-     -d '{"amount": 50000, "channel":"transfer", "hour": 3}'
+     -d '{"transactionId":"adhoc-1","accountId":"demo","amount":50000,"timestamp":"2026-01-01T03:00:00Z"}'
 ```
 
 Use real IBM hardware (Phase 3.5):
@@ -229,8 +246,8 @@ Use real IBM hardware (Phase 3.5):
 1. Add to `infrastructure/.env`:
    ```env
    IBM_QUANTUM_TOKEN=<your-token>
-   IBM_QUANTUM_INSTANCE=<your-crn>
-   QRNG_BACKEND=ibm
+   IBM_QUANTUM_CRN=<your-crn>
+   QUANTUM_BACKEND=ibm
    ```
 2. Restart only the quantum service:
    ```bash
@@ -248,14 +265,14 @@ Use real IBM hardware (Phase 3.5):
 ## 9. Running the automated test suites
 
 ```bash
-# Per-service unit + API tests + coverage (see README §9 for the table)
-cd services/identity-service && npm test && npm run test:coverage
+make test                     # everything below in one go
+
+# Per package
+cd shared                    && npm test
 cd services/account-service  && npm test && npm run test:coverage
+cd services/identity-service && npm test && npm run test:coverage
 cd services/ledger-service   && npm test && npm run test:coverage
 cd services/api-gateway      && npm test && npm run test:coverage
-
-# Quantum-service (pytest)
-cd services/quantum-service && pytest -q
 
 # Fraud-service (Phase 4)
 cd services/fraud-service && pytest -q

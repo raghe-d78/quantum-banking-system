@@ -59,8 +59,8 @@ describe("ledgerRepository — Append-only enforcement (T2.4)", () => {
     expect(typeof ledgerRepo.remove).toBe("undefined");
   });
 
-  test("only exposes append(), findByAccountId(), findById()", () => {
-    const allowed   = ["append", "findByAccountId", "findById"];
+  test("exposes only read helpers + append()", () => {
+    const allowed   = ["append", "findByAccountId", "findById", "findByTransactionId", "reconcile", "ping"];
     const actual    = Object.keys(ledgerRepo);
     const forbidden = actual.filter(m => !allowed.includes(m));
     expect(forbidden).toHaveLength(0);

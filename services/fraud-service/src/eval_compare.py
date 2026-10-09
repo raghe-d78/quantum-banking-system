@@ -8,7 +8,7 @@ docs/comparative-analysis.md.
 
 Run inside the fraud-service container:
 
-    docker exec -w /app infrastructure-fraud-service-1 \
+    docker exec -w /app qbs-fraud-service-1 \
         python -m src.eval_compare
 """
 from __future__ import annotations

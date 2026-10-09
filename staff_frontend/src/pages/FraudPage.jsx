@@ -24,8 +24,10 @@ const RISK_CFG = {
 const STATUS_CFG = {
   OPEN:      { label: "Open",      bg: tk.redBg,    color: tk.red,    border: tk.redBorder   },
   CANCELLED: { label: "Cancelled", bg: tk.greenBg,  color: tk.green,  border: tk.greenBorder },
-  REVIEWED:  { label: "Reviewed",  bg: tk.blueBg,   color: tk.blue,   border: tk.blueBorder  },
+  DISMISSED: { label: "Dismissed", bg: tk.blueBg,   color: tk.blue,   border: tk.blueBorder  },
 };
+// Unified error extraction: services return {message} (AppError) or {error}.
+const errMsg = (e) => e.response?.data?.message ?? e.response?.data?.error?.message ?? e.response?.data?.error ?? e.message;
 
 const Pill = ({ cfg, children }) => (
   <span style={{
@@ -54,7 +56,7 @@ function useAlerts(limit, refreshMs) {
       setAlerts(res.data?.alerts ?? []);
       setError(null);
     } catch (e) {
-      setError(e.response?.data?.error ?? e.message);
+      setError(errMsg(e));
     } finally {
       setLoading(false);
     }
@@ -83,7 +85,7 @@ function useStats(refreshMs) {
       ]);
       setStats(s.data); setModel(m.data); setError(null);
     } catch (e) {
-      setError(e.response?.data?.error ?? e.message);
+      setError(errMsg(e));
     }
   }, []);
 
@@ -160,8 +162,22 @@ function TransactionsView() {
       await reload();
     } catch (e) {
       const code = e.response?.status;
-      const msg  = e.response?.data?.error?.message ?? e.response?.data?.error ?? e.message;
-      setToast({ kind: "err", msg: `Cancel failed (${code}): ${msg}` });
+      setToast({ kind: "err", msg: `Cancel failed (${code}): ${errMsg(e)}` });
+    } finally {
+      setBusy(null);
+      setTimeout(() => setToast(null), 6000);
+    }
+  };
+
+  const dismiss = async (txId) => {
+    if (!window.confirm("Mark this alert as reviewed and benign? The transaction is NOT reversed.")) return;
+    setBusy(txId);
+    try {
+      await api.post(`/fraud/alerts/${txId}/dismiss`);
+      setToast({ kind: "ok", msg: `Alert ${shortId(txId)} dismissed.` });
+      await reload();
+    } catch (e) {
+      setToast({ kind: "err", msg: `Dismiss failed (${e.response?.status}): ${errMsg(e)}` });
     } finally {
       setBusy(null);
       setTimeout(() => setToast(null), 6000);
@@ -178,6 +194,7 @@ function TransactionsView() {
           <option value="Medium">Medium only</option>
           <option value="OPEN">Open only</option>
           <option value="CANCELLED">Cancelled only</option>
+          <option value="DISMISSED">Dismissed only</option>
         </select>
       </Header>
 
@@ -212,16 +229,28 @@ function TransactionsView() {
                   <td style={{ ...td, color: tk.muted }}>{fmtDate(a.createdAt)}</td>
                   <td style={td}>
                     {a.status === "OPEN" ? (
-                      <button
-                        onClick={() => cancel(a.transactionId)}
-                        disabled={busy === a.transactionId}
-                        style={{
-                          padding: "6px 14px", fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
-                          background: busy === a.transactionId ? tk.muted : tk.red, color: "#fff",
-                          border: "none", borderRadius: 6, cursor: busy === a.transactionId ? "wait" : "pointer",
-                          fontFamily: "'Georgia', serif",
-                        }}
-                      >{busy === a.transactionId ? "Cancelling…" : "Cancel"}</button>
+                      <div style={{ display: "flex", gap: 6 }}>
+                        <button
+                          onClick={() => cancel(a.transactionId)}
+                          disabled={busy === a.transactionId}
+                          style={{
+                            padding: "6px 14px", fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+                            background: busy === a.transactionId ? tk.muted : tk.red, color: "#fff",
+                            border: "none", borderRadius: 6, cursor: busy === a.transactionId ? "wait" : "pointer",
+                            fontFamily: "'Georgia', serif",
+                          }}
+                        >{busy === a.transactionId ? "Working…" : "Cancel"}</button>
+                        <button
+                          onClick={() => dismiss(a.transactionId)}
+                          disabled={busy === a.transactionId}
+                          style={{
+                            padding: "6px 14px", fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
+                            background: "#fff", color: tk.navy, border: `1px solid ${tk.creamBorder}`,
+                            borderRadius: 6, cursor: busy === a.transactionId ? "wait" : "pointer",
+                            fontFamily: "'Georgia', serif",
+                          }}
+                        >Dismiss</button>
+                      </div>
                     ) : <span style={{ fontSize: 11, color: tk.muted }}>—</span>}
                   </td>
                 </tr>
@@ -240,6 +269,8 @@ function StatsView() {
   const kpis = stats ? [
     { label: "Total scored",  value: stats.totalScored, color: tk.navy },
     { label: "Open alerts",   value: stats.openAlerts,  color: tk.red },
+    { label: "Cancelled",     value: stats.cancelledAlerts, color: tk.green },
+    { label: "Dismissed",     value: stats.dismissedAlerts, color: tk.blue },
     { label: "Critical",      value: stats.critical,    color: tk.red },
     { label: "High",          value: stats.high,        color: tk.orange },
     { label: "Medium",        value: stats.medium,      color: tk.blue },
@@ -331,12 +362,12 @@ const ModelCard = ({ title, m }) => (
     <h3 style={sectionTitle}>{title}</h3>
     {m ? (
       <>
-        <KV label="Version" value={m.version || "—"} />
-        {typeof m.precision === "number" && <KV label="Precision" value={m.precision.toFixed(3)} />}
-        {typeof m.recall    === "number" && <KV label="Recall"    value={m.recall.toFixed(3)} />}
-        {typeof m.f1        === "number" && <KV label="F1"        value={m.f1.toFixed(3)} />}
-        {typeof m.roc_auc   === "number" && <KV label="ROC AUC"   value={m.roc_auc.toFixed(3)} />}
-        {m.trainedAt && <KV label="Trained at" value={fmtDate(m.trainedAt)} />}
+        <KV label="Version" value={m.modelVersion || m.version || "—"} />
+        {typeof m.metrics?.precision === "number" && <KV label="Precision" value={m.metrics.precision.toFixed(3)} />}
+        {typeof m.metrics?.recall    === "number" && <KV label="Recall"    value={m.metrics.recall.toFixed(3)} />}
+        {typeof m.metrics?.f1        === "number" && <KV label="F1"        value={m.metrics.f1.toFixed(3)} />}
+        {typeof m.metrics?.roc_auc   === "number" && <KV label="ROC AUC"   value={m.metrics.roc_auc.toFixed(3)} />}
+        {m.trainedAt && <KV label="Trained at" value={fmtDate(typeof m.trainedAt === "number" ? m.trainedAt * 1000 : m.trainedAt)} />}
       </>
     ) : <div style={{ fontSize: 12, color: tk.muted }}>No metadata available.</div>}
   </div>
